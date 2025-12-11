@@ -703,6 +703,584 @@ async def create_session_manager() -> AdvancedSessionManager:
     
     return manager
 
+class CompleteSecureSystem:
+    """سیستم کامل با همه حفاظت‌ها"""
+    
+    def __init__(self, token: str, api_id: int, api_hash: str):
+        self.bot = telebot.TeleBot(token)
+        
+        # ماژول‌های امنیتی
+        self.auth = UserAuthentication()
+        self.session_mgr = IsolatedSessionManager()
+        self.access_ctl = OwnershipBasedAccess()
+        self.logout_sys = SafeLogoutSystem()
+        self.activity_monitor = UserActivityMonitor()
+        
+        # تنظیمات
+        self.settings = {
+            'max_accounts_per_user': 2,
+            'session_timeout_hours': 24,
+            'require_phone_verification': True,
+            'enable_auto_logout': True,
+            'log_all_activities': True,
+            'notify_on_new_login': True,
+            'enable_two_step_verification': False
+        }
+        
+        self.setup_handlers()
+    
+    def setup_handlers(self):
+        @self.bot.message_handler(commands=['login'])
+        def login_handler(message):
+            user_id = message.from_user.id
+            
+            # 1. بررسی مجوز کاربر
+            auth_result = self.auth.is_user_allowed(user_id)
+            if not auth_result['allowed']:
+                self.bot.send_message(user_id, "❌ دسترسی denied")
+                return
+            
+            # 2. بررسی محدودیت تعداد اکانت
+            user_accounts = self._count_user_accounts(user_id)
+            if user_accounts >= self.settings['max_accounts_per_user']:
+                self.bot.send_message(
+                    user_id,
+                    f"❌ شما حداکثر {self.settings['max_accounts_per_user']} اکانت می‌توانید اضافه کنید."
+                )
+                return
+            
+            # 3. درخواست شماره تلفن
+            msg = self.bot.send_message(
+                user_id,
+                "📱 لطفاً شماره تلفن تلگرام خود را ارسال کنید:\n\n"
+                "⚠️ توجه: این شماره فقط برای یکبار ورود استفاده می‌شود."
+            )
+            self.bot.register_next_step_handler(msg, process_login)
+        
+        def process_login(message):
+            user_id = message.from_user.id
+            phone = message.text
+            
+            # 1. اعتبارسنجی شماره
+            if not self._validate_phone_number(phone):
+                self.bot.send_message(user_id, "❌ شماره تلفن نامعتبر است")
+                return
+            
+            # 2. ایجاد session مخصوص کاربر
+            session_name = f"user_{user_id}_{int(time.time())}"
+            session_path = self.session_mgr.create_user_session(user_id, session_name)
+            
+            # 3. ثبت مالکیت
+            self.access_ctl.register_session_owner(session_name, user_id)
+            
+            # 4. شروع فرآیند login (در thread جدا)
+            Thread(target=self._perform_login_async, 
+                  args=(user_id, phone, session_name, session_path)).start()
+            
+            self.bot.send_message(
+                user_id,
+                "⏳ در حال اتصال...\n"
+                "لطفاً کد تأیید را در تلگرام خود وارد کنید."
+            )
+        
+        @self.bot.message_handler(commands=['myaccounts'])
+        def list_accounts_handler(message):
+            user_id = message.from_user.id
+            
+            # فقط مالک می‌تواند session‌های خود را ببیند
+            sessions = self.session_mgr.list_user_sessions(user_id)
+            
+            if not sessions:
+                self.bot.send_message(user_id, "📭 هیچ اکانتی ندارید.")
+                return
+            
+            keyboard = types.InlineKeyboardMarkup()
+            for session_path in sessions:
+                session_name = session_path.stem
+                btn_text = f"👤 {session_name}"
+                
+                keyboard.add(types.InlineKeyboardButton(
+                    btn_text,
+                    callback_data=f"view_session_{session_name}"
+                ))
+            
+            self.bot.send_message(
+                user_id,
+                f"📋 اکانت‌های شما ({len(sessions)}):",
+                reply_markup=keyboard
+            )
+        
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith('logout_'))
+        def logout_callback_handler(call):
+            user_id = call.from_user.id
+            session_name = call.data.replace('logout_', '')
+            
+            # بررسی مالکیت
+            if not self.access_ctl.can_access_session(user_id, session_name):
+                self.bot.answer_callback_query(call.id, "❌ دسترسی denied")
+                return
+            
+            # درخواست logout با تأیید
+            result = self.logout_sys.request_logout(user_id, session_name)
+            
+            if result['success']:
+                if result.get('needs_confirmation'):
+                    self.bot.answer_callback_query(
+                        call.id, 
+                        "لطفاً در پیام بعدی تأیید کنید"
+                    )
+                else:
+                    self.bot.answer_callback_query(call.id, "✅ logout شد")
+            else:
+                self.bot.answer_callback_query(call.id, f"❌ {result.get('error')}")
+        
+        @self.bot.message_handler(func=lambda m: m.text.startswith('/confirm_logout_'))
+        def confirm_logout_handler(message):
+            user_id = message.from_user.id
+            request_id = message.text.replace('/confirm_logout_', '')
+            
+            # پیدا کردن درخواست
+            if request_id in self.logout_sys.logout_requests:
+                req = self.logout_sys.logout_requests[request_id]
+                
+                if req['user_id'] == user_id and req['status'] == 'pending':
+                    # اجرای logout
+                    result = self.logout_sys._execute_logout(
+                        user_id, 
+                        req['session_name']
+                    )
+                    
+                    if result['success']:
+                        self.bot.send_message(user_id, "✅ با موفقیت logout شدید.")
+                    else:
+                        self.bot.send_message(user_id, f"❌ {result.get('error')}")
+                    
+                    # به‌روزرسانی وضعیت درخواست
+                    req['status'] = 'completed'
+                else:
+                    self.bot.send_message(user_id, "❌ درخواست نامعتبر است.")
+            else:
+                self.bot.send_message(user_id, "❌ درخواست یافت نشد.")
+
+class SafeLogoutSystem:
+    """سیستم logout ایمن با تأیید کاربر"""
+    
+    def __init__(self):
+        self.active_sessions = {}  # user_id -> {sessions: [], last_activity: timestamp}
+        self.logout_requests = {}  # session_name -> {requested_by: user_id, timestamp}
+        self.logout_settings = {
+            'auto_logout_after_hours': 24,
+            'inactivity_timeout_minutes': 60,
+            'require_confirmation': True,
+            'send_warning_before_logout': True,
+            'warning_minutes_before': 5
+        }
+    
+    async def check_auto_logout(self, user_id: int, session_name: str) -> bool:
+        """بررسی نیاز به auto-logout"""
+        if user_id not in self.active_sessions:
+            return False
+        
+        session_info = self.active_sessions[user_id].get(session_name)
+        if not session_info:
+            return False
+        
+        last_activity = session_info['last_activity']
+        now = time.time()
+        
+        # 1. بررسی عدم فعالیت
+        inactive_minutes = (now - last_activity) / 60
+        if inactive_minutes > self.logout_settings['inactivity_timeout_minutes']:
+            logger.info(f"Session {session_name} inactive for {inactive_minutes:.1f} minutes")
+            
+            if self.logout_settings['send_warning_before_logout']:
+                await self._send_inactivity_warning(user_id, session_name)
+            
+            return True
+        
+        # 2. بررسی مدت زمان کلی session
+        session_age_hours = (now - session_info['created_at']) / 3600
+        if session_age_hours > self.logout_settings['auto_logout_after_hours']:
+            logger.info(f"Session {session_name} expired after {session_age_hours:.1f} hours")
+            
+            if self.logout_settings['send_warning_before_logout']:
+                await self._send_expiry_warning(user_id, session_name)
+            
+            return True
+        
+        return False
+    
+    async def _send_inactivity_warning(self, user_id: int, session_name: str):
+        """ارسال هشدار عدم فعالیت"""
+        warning_msg = (
+            f"⚠️ اخطار: session '{session_name}' به دلیل عدم فعالیت در حال انقضا است.\n\n"
+            f"در صورت عدم فعالیت در {self.logout_settings['warning_minutes_before']} دقیقه آینده، "
+            f"به صورت خودکار logout خواهد شد."
+        )
+        
+        # ارسال به کاربر (مثلاً از طریق ربات)
+        await self._send_message_to_user(user_id, warning_msg)
+    
+    async def request_logout(self, user_id: int, session_name: str, 
+                           force: bool = False) -> dict:
+        """درخواست logout"""
+        
+        # 1. بررسی مالکیت
+        if not await self._validate_ownership(user_id, session_name):
+            return {
+                'success': False,
+                'error': 'شما مالک این session نیستید'
+            }
+        
+        # 2. اگر force نباشد، درخواست تأیید
+        if not force and self.logout_settings['require_confirmation']:
+            request_id = f"logout_req_{int(time.time())}"
+            
+            self.logout_requests[request_id] = {
+                'user_id': user_id,
+                'session_name': session_name,
+                'request_time': time.time(),
+                'status': 'pending'
+            }
+            
+            # ارسال درخواست تأیید
+            confirmation_msg = (
+                f"🔐 درخواست logout از session '{session_name}'\n\n"
+                f"آیا مطمئن هستید؟\n"
+                f"✅ تأیید: /confirm_logout_{request_id}\n"
+                f"❌ انصراف: /cancel_logout_{request_id}"
+            )
+            
+            await self._send_message_to_user(user_id, confirmation_msg)
+            
+            return {
+                'success': True,
+                'needs_confirmation': True,
+                'request_id': request_id
+            }
+        
+        # 3. اجرای logout
+        return await self._execute_logout(user_id, session_name)
+    
+    async def _execute_logout(self, user_id: int, session_name: str) -> dict:
+        """اجرای logout"""
+        try:
+            # 1. قطع اتصال
+            if session_name in self.active_sessions.get(user_id, {}):
+                session_info = self.active_sessions[user_id][session_name]
+                
+                if session_info.get('client'):
+                    await session_info['client'].disconnect()
+            
+            # 2. حذف از active sessions
+            if user_id in self.active_sessions:
+                if session_name in self.active_sessions[user_id]:
+                    del self.active_sessions[user_id][session_name]
+            
+            # 3. حذف فایل session (اختیاری)
+            if self.logout_settings.get('delete_session_file', False):
+                session_path = Path(f"sessions/{session_name}.session")
+                if session_path.exists():
+                    session_path.unlink()
+            
+            # 4. ثبت در لاگ
+            logger.info(f"User {user_id} logged out from {session_name}")
+            
+            return {
+                'success': True,
+                'message': 'با موفقیت logout شدید'
+            }
+            
+        except Exception as e:
+            logger.error(f"Logout failed: {e}")
+            return {
+                'success': False,
+                'error': f'خطا در logout: {str(e)}'
+            }
+
+class OwnershipBasedAccess:
+    """دسترسی مبتنی بر مالکیت"""
+    
+    def __init__(self):
+        self.ownership_db = {}  # session_name -> owner_user_id
+        self.shared_sessions = {}  # session_name -> [user_ids]
+    
+    def register_session_owner(self, session_name: str, owner_user_id: int):
+        """ثبت مالک session"""
+        self.ownership_db[session_name] = owner_user_id
+        
+        # ذخیره در فایل
+        self._save_ownership_db()
+    
+    def can_access_session(self, user_id: int, session_name: str) -> bool:
+        """بررسی دسترسی کاربر به session"""
+        # 1. بررسی مالک اصلی
+        if session_name in self.ownership_db:
+            if self.ownership_db[session_name] == user_id:
+                return True
+        
+        # 2. بررسی دسترسی اشتراکی
+        if session_name in self.shared_sessions:
+            if user_id in self.shared_sessions[session_name]:
+                return True
+        
+        # 3. بررسی ادمین بودن
+        if self._is_admin(user_id):
+            return True
+        
+        return False
+    
+    def share_session(self, session_name: str, owner_user_id: int, target_user_id: int):
+        """اشتراک‌گذاری session"""
+        if session_name not in self.ownership_db:
+            return False
+        
+        if self.ownership_db[session_name] != owner_user_id:
+            return False  # فقط مالک می‌تواند اشتراک بگذارد
+        
+        if session_name not in self.shared_sessions:
+            self.shared_sessions[session_name] = []
+        
+        if target_user_id not in self.shared_sessions[session_name]:
+            self.shared_sessions[session_name].append(target_user_id)
+            self._save_shared_sessions()
+            return True
+        
+        return False
+
+class IsolatedSessionManager:
+    """مدیریت session با جداسازی کامل"""
+    
+    def __init__(self, base_dir: Path = Path("sessions")):
+        self.base_dir = base_dir
+        
+        # ساختار ایمن:
+        # sessions/
+        # ├── user_123456789/          # پوشه کاربر
+        # │   ├── data/               # داده‌های کاربر
+        # │   ├── session_abc.session # session‌ها
+        # │   └── session_def.session
+        # ├── user_987654321/
+        # │   └── ...
+        # └── user_{user_id}/
+        #     └── ...
+    
+    def get_user_session_dir(self, user_id: int) -> Path:
+        """دریافت پوشه مخصوص کاربر"""
+        user_dir = self.base_dir / f"user_{user_id}"
+        user_dir.mkdir(exist_ok=True, parents=True)
+        
+        # تنظیم مجوزهای امن
+        user_dir.chmod(0o700)  # فقط مالک دسترسی دارد
+        
+        return user_dir
+    
+    def create_user_session(self, user_id: int, session_name: str) -> Path:
+        """ایجاد session برای کاربر خاص"""
+        user_dir = self.get_user_session_dir(user_id)
+        session_dir = user_dir / "sessions"
+        session_dir.mkdir(exist_ok=True)
+        
+        session_path = session_dir / f"{session_name}.session"
+        return session_path
+    
+    def list_user_sessions(self, user_id: int) -> List[Path]:
+        """لیست session‌های یک کاربر"""
+        user_dir = self.base_dir / f"user_{user_id}"
+        if not user_dir.exists():
+            return []
+        
+        session_dir = user_dir / "sessions"
+        if not session_dir.exists():
+            return []
+        
+        return list(session_dir.glob("*.session"))
+    
+    def delete_user_session(self, user_id: int, session_name: str) -> bool:
+        """حذف session کاربر"""
+        session_path = self.base_dir / f"user_{user_id}" / "sessions" / f"{session_name}.session"
+        
+        if session_path.exists():
+            session_path.unlink()
+            return True
+        return False
+    
+    def validate_user_access(self, user_id: int, session_path: Path) -> bool:
+        """بررسی دسترسی کاربر به session"""
+        try:
+            # بررسی مالکیت فایل
+            if not session_path.exists():
+                return False
+            
+            # بررسی اینکه session در پوشه کاربر باشد
+            user_dir = self.base_dir / f"user_{user_id}"
+            return user_dir in session_path.parents
+            
+        except:
+            return False
+
+class UserAuthentication:
+    """سیستم احراز هویت و محدودیت کاربران"""
+    
+    def __init__(self):
+        self.allowed_users_file = Path("data/allowed_users.json")
+        self.pending_requests_file = Path("data/pending_requests.json")
+        self.user_limits_file = Path("data/user_limits.json")
+        
+        self.allowed_users = self._load_allowed_users()
+        self.pending_requests = self._load_pending_requests()
+        self.user_limits = self._load_user_limits()
+    
+    def _load_allowed_users(self):
+        """بارگذاری کاربران مجاز"""
+        if self.allowed_users_file.exists():
+            with open(self.allowed_users_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {
+            'admins': [123456789],  # آیدی عددی ادمین‌ها
+            'verified_users': [],   # کاربران تأیید شده
+            'banned_users': []      # کاربران مسدود شده
+        }
+    
+    def is_user_allowed(self, user_id: int, username: str = None) -> dict:
+        """بررسی مجوز کاربر"""
+        
+        # 1. بررسی مسدود بودن
+        if user_id in self.allowed_users['banned_users']:
+            return {'allowed': False, 'reason': 'اکانت شما مسدود شده است'}
+        
+        # 2. بررسی ادمین بودن
+        if user_id in self.allowed_users['admins']:
+            return {'allowed': True, 'role': 'admin', 'max_accounts': 5}
+        
+        # 3. بررسی کاربر تأیید شده
+        if user_id in self.allowed_users['verified_users']:
+            return {'allowed': True, 'role': 'verified', 'max_accounts': 2}
+        
+        # 4. کاربر جدید - نیاز به تأیید
+        return {'allowed': False, 'reason': 'نیاز به تأیید ادمین', 'needs_approval': True}
+    
+    def request_access(self, user_id: int, username: str, phone: str = None):
+        """درخواست دسترسی جدید"""
+        request_id = f"req_{int(time.time())}_{user_id}"
+        
+        request_data = {
+            'request_id': request_id,
+            'user_id': user_id,
+            'username': username,
+            'phone_hash': hashlib.sha256(phone.encode()).hexdigest()[:16] if phone else None,
+            'request_time': datetime.now().isoformat(),
+            'status': 'pending',
+            'reviewed_by': None,
+            'review_time': None
+        }
+        
+        self.pending_requests[request_id] = request_data
+        self._save_pending_requests()
+        
+        # اطلاع به ادمین
+        self._notify_admins_new_request(request_data)
+        
+        return request_id
+    
+    def approve_user(self, request_id: str, admin_id: int):
+        """تأیید کاربر"""
+        if request_id in self.pending_requests:
+            self.pending_requests[request_id]['status'] = 'approved'
+            self.pending_requests[request_id]['reviewed_by'] = admin_id
+            self.pending_requests[request_id]['review_time'] = datetime.now().isoformat()
+            
+            user_id = self.pending_requests[request_id]['user_id']
+            self.allowed_users['verified_users'].append(user_id)
+            
+            self._save_pending_requests()
+            self._save_allowed_users()
+            
+            return True
+        return False
+    
+    def reject_user(self, request_id: str, admin_id: int, reason: str):
+        """رد درخواست کاربر"""
+        if request_id in self.pending_requests:
+            self.pending_requests[request_id]['status'] = 'rejected'
+            self.pending_requests[request_id]['reviewed_by'] = admin_id
+            self.pending_requests[request_id]['review_time'] = datetime.now().isoformat()
+            self.pending_requests[request_id]['rejection_reason'] = reason
+            
+            self._save_pending_requests()
+            return True
+        return False
+
+class SecureLoginBot:
+    """ربات با سیستم احراز هویت"""
+    
+    def __init__(self, token: str, api_id: int, api_hash: str):
+        self.bot = telebot.TeleBot(token)
+        self.auth = UserAuthentication()
+        self.user_sessions = {}  # user_id -> {session_name: info}
+        self.user_account_limits = {}  # user_id -> account_count
+        
+        self.setup_handlers()
+    
+    def setup_handlers(self):
+        @self.bot.message_handler(commands=['start'])
+        def start_handler(message):
+            user_id = message.from_user.id
+            username = message.from_user.username
+            
+            # بررسی مجوز
+            auth_result = self.auth.is_user_allowed(user_id, username)
+            
+            if not auth_result['allowed']:
+                if auth_result.get('needs_approval'):
+                    # درخواست دسترسی
+                    msg = self.bot.send_message(
+                        user_id,
+                        "👋 برای استفاده از ربات نیاز به تأیید دارید.\n\n"
+                        "لطفاً شماره تلفن خود را ارسال کنید:"
+                    )
+                    self.bot.register_next_step_handler(msg, process_access_request)
+                else:
+                    self.bot.send_message(user_id, f"❌ {auth_result['reason']}")
+                return
+            
+            # کاربر مجاز است
+            keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+            
+            if auth_result['role'] == 'admin':
+                keyboard.row('🔐 ورود به اکانت', '👨‍💼 پنل ادمین')
+                keyboard.row('📋 اکانت‌های من', '🚪 خروج')
+            else:
+                keyboard.row('🔐 ورود به اکانت', '📋 اکانت‌های من')
+                keyboard.row('🚪 خروج', 'ℹ️ راهنما')
+            
+            self.bot.send_message(
+                user_id,
+                f"✅ شما دسترسی دارید.\n\n"
+                f"🔄 می‌توانید حداکثر {auth_result.get('max_accounts', 1)} اکانت اضافه کنید.",
+                reply_markup=keyboard
+            )
+        
+        def process_access_request(message):
+            user_id = message.from_user.id
+            phone = message.text
+            
+            # ثبت درخواست
+            request_id = self.auth.request_access(
+                user_id=user_id,
+                username=message.from_user.username,
+                phone=phone
+            )
+            
+            self.bot.send_message(
+                user_id,
+                "✅ درخواست شما ثبت شد.\n\n"
+                "در صورت تأیید ادمین به شما اطلاع داده می‌شود.\n"
+                "لطفاً صبور باشید."
+            )
+
+
+
 if __name__ == "__main__":
     # تست سیستم
     async def test():
