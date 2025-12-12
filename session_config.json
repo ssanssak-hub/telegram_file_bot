@@ -1,110 +1,83 @@
 {
-  "version": "2.0.0",
+  "config_version": "3.0.0",
+  "description": "Session Manager Configuration - Compatible with Advanced Session Manager & Monitor",
   "last_modified": "2024-01-15T10:30:00Z",
-  "environment": "production",  // development, staging, production
+  "environment": "production",
   
-  "session_management": {
+  "valid_environments": ["development", "staging", "production"],
+  "compatible_versions": {
+    "session_manager": ">=2.0.0",
+    "session_monitor": ">=2.0.0"
+  },
+  
+  "session_manager_settings": {
+    "base_directory": "secure_sessions",
     "max_sessions_per_user": 5,
     "max_total_sessions": 100,
     "session_lifetime_hours": 168,
     "inactive_session_cleanup_hours": 72,
-    "session_naming_pattern": "user_{user_id}_{timestamp}_{random}",
     
-    "auto_rotate": {
+    "session_creation": {
+      "naming_pattern": "user_{user_id}_{timestamp}_{random}",
+      "generate_device_info": true,
+      "device_pool_size": 5,
+      "geo_diversity_enabled": false
+    },
+    
+    "auto_rotation": {
       "enabled": true,
-      "strategies": [
-        {
-          "type": "scheduled",
-          "schedule": "random",  // fixed, random, intelligent
-          "min_interval_hours": 24,
-          "max_interval_hours": 48,
-          "preferred_window": ["02:00", "05:00"]
-        },
-        {
-          "type": "error_based",
-          "max_errors_before_rotate": 3,
-          "error_types": ["FloodWaitError", "AuthKeyError", "SessionRevokedError"]
-        },
-        {
-          "type": "usage_based",
-          "max_requests_before_rotate": 1000,
-          "max_duration_before_rotate_hours": 72
-        },
-        {
-          "type": "health_based",
-          "rotate_on_health_below": 30,
-          "health_check_interval_minutes": 30
-        }
-      ]
+      "rotation_strategies": ["scheduled", "error_based", "usage_based", "health_based"],
+      "scheduled_rotation": {
+        "strategy": "random",
+        "min_interval_hours": 24,
+        "max_interval_hours": 48,
+        "preferred_window": ["02:00", "05:00"]
+      },
+      "error_based_rotation": {
+        "max_errors": 3,
+        "error_types": ["FloodWaitError", "AuthKeyError", "SessionRevokedError", "ConnectionError"]
+      },
+      "usage_based_rotation": {
+        "max_requests": 1000,
+        "max_duration_hours": 72
+      },
+      "health_based_rotation": {
+        "rotate_below_score": 30,
+        "check_interval_minutes": 30
+      }
     },
     
-    "rotate_after_errors": 3,
-    "rotate_after_flood_wait": true,
-    "rotate_on_suspicious_activity": true
-  },
-  
-  "backup_recovery": {
-    "backup_enabled": true,
-    "backup_count": 10,
-    "backup_schedule": {
-      "frequency": "daily",  // hourly, daily, weekly
-      "time": "random",      // random time between 01:00-04:00
-      "retention_days": 30
-    },
-    
-    "backup_encryption": {
+    "encryption": {
       "enabled": true,
       "algorithm": "AES-256-GCM",
-      "key_rotation_days": 7,
-      "encrypt_metadata": true
+      "key_derivation": {
+        "algorithm": "PBKDF2HMAC",
+        "iterations": 100000,
+        "key_length": 32
+      },
+      "key_rotation": {
+        "master_key_days": 7,
+        "session_key_hours": 24
+      },
+      "in_memory_encryption": true
     },
     
-    "recovery": {
-      "auto_recover_on_corruption": false,  // Manual recovery is safer
-      "validate_backups_on_start": true,
-      "test_restore_interval_days": 7,
-      "keep_multiple_versions": true,
-      "version_count": 3
-    }
-  },
-  
-  "encryption_security": {
-    "session_encryption": {
+    "backup": {
       "enabled": true,
-      "algorithm": "AES-256-GCM",
-      "key_derivation_iterations": 100000,
-      "encrypt_in_memory": true
+      "count": 10,
+      "schedule": "daily",
+      "retention_days": 30,
+      "backup_encryption": true,
+      "compression": {
+        "enabled": true,
+        "algorithm": "gzip",
+        "level": 6
+      }
     },
     
-    "key_management": {
-      "master_key_rotation_days": 7,
-      "session_key_rotation_hours": 24,
-      "key_storage": "secure_env",  // secure_env, vault, kms
-      "backup_key_separately": true
-    },
-    
-    "file_permissions": {
-      "session_files": 600,
-      "config_files": 600,
-      "backup_files": 600,
-      "log_files": 640
-    },
-    
-    "sensitive_data": {
-      "log_sensitive_operations": false,
-      "mask_phone_numbers": true,
-      "mask_api_keys": true,
-      "hash_identifiers": true
-    }
-  },
-  
-  "validation_integrity": {
     "validation": {
       "validate_on_start": true,
-      "validate_on_use": false,
-      "validate_interval_minutes": 60,
-      "validate_after_errors": true,
-      
+      "interval_minutes": 60,
       "checks": [
         "file_existence",
         "file_size",
@@ -112,145 +85,113 @@
         "encryption_integrity",
         "data_structure",
         "expiry_check"
-      ]
-    },
-    
-    "integrity": {
-      "enable_checksums": true,
-      "checksum_algorithm": "sha256",
-      "verify_on_load": true,
-      "auto_quarantine_corrupted": true,
+      ],
+      "checksum": {
+        "enabled": true,
+        "algorithm": "sha256"
+      },
+      "auto_quarantine": true,
       "alert_on_corruption": true
     },
     
-    "auto_fix": {
+    "performance": {
+      "caching": {
+        "enabled": true,
+        "cache_size": 10,
+        "cache_ttl_seconds": 300,
+        "strategy": "lru",
+        "preload_active_sessions": true,
+        "warmup_on_start": true
+      },
+      "connection_pool": {
+        "enabled": true,
+        "size": 5,
+        "max_idle_seconds": 300,
+        "health_check_interval": 60
+      },
+      "compression": {
+        "enabled": true,
+        "level": 6
+      },
+      "resource_limits": {
+        "max_concurrent_sessions": 20,
+        "max_requests_per_minute": 60,
+        "max_memory_mb_per_session": 50
+      }
+    },
+    
+    "rate_limiting": {
       "enabled": true,
-      "strategies": [
-        {
-          "type": "restore_from_backup",
-          "max_age_hours": 24,
-          "require_confirmation": false
-        },
-        {
-          "type": "recreate_session",
-          "only_if_no_backup": true,
-          "notify_user": true
-        }
-      ]
-    }
-  },
-  
-  "performance_optimization": {
-    "caching": {
-      "session_cache_size": 10,
-      "cache_ttl_seconds": 300,
-      "cache_strategy": "lru",  // lru, lfu, fifo
-      "preload_active_sessions": true,
-      "warmup_on_start": true
+      "strategy": "token_bucket",
+      "limits": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 1000,
+        "concurrent_connections": 10,
+        "burst_size": 15
+      },
+      "scopes": ["session", "user", "ip"]
     },
     
-    "connection": {
-      "pooling": true,
-      "pool_size": 5,
-      "max_idle_time_seconds": 300,
-      "health_check_interval_seconds": 60
-    },
-    
-    "resource_limits": {
-      "max_concurrent_sessions": 20,
-      "max_requests_per_minute": 60,
-      "max_memory_per_session_mb": 50,
-      "cpu_throttle_percent": 70
-    },
-    
-    "optimizations": {
-      "compress_sessions": true,
-      "compression_level": 6,
-      "async_operations": true,
-      "batch_operations": true,
-      "lazy_loading": true
-    }
-  },
-  
-  "geo_device_diversity": {
-    "geo_diversity": {
-      "enabled": false,
-      "strategy": "round_robin",  // random, round_robin, weighted
-      "locations": [
-        {
-          "country": "Germany",
-          "city": "Frankfurt",
-          "weight": 1,
-          "proxy_required": false
-        },
-        {
-          "country": "USA",
-          "city": "New York",
-          "weight": 1,
-          "proxy_required": false
-        }
-      ],
-      "min_distance_km": 1000,
-      "change_interval_hours": 24
-    },
-    
-    "device_rotation": {
+    "circuit_breaker": {
       "enabled": true,
-      "device_pool_size": 5,
-      "rotation_strategy": "sequential",  // random, sequential, intelligent
-      "device_types": [
-        {
-          "type": "android",
-          "models": ["Samsung Galaxy S24", "Google Pixel 8", "Xiaomi 14"],
-          "weight": 3
-        },
-        {
-          "type": "ios",
-          "models": ["iPhone 15 Pro", "iPhone 14"],
-          "weight": 2
-        },
-        {
-          "type": "desktop",
-          "models": ["Windows", "macOS", "Linux"],
-          "weight": 1
-        }
-      ],
-      "maintain_session_consistency": true
+      "failure_threshold": 5,
+      "reset_timeout_seconds": 60,
+      "half_open_max_attempts": 3
     }
   },
   
-  "monitoring_alerting": {
+  "session_monitor_settings": {
     "monitoring": {
       "enabled": true,
       "check_interval_seconds": 300,
       "metrics_retention_days": 30,
-      "log_retention_days": 90,
-      
-      "health_checks": [
-        "session_health",
-        "system_resources",
-        "network_latency",
-        "error_rates",
-        "response_times"
-      ]
+      "alert_retention_days": 30,
+      "enable_real_time_alerts": true,
+      "alert_cooldown_seconds": 300,
+      "max_metrics_in_memory": 10000
+    },
+    
+    "system_thresholds": {
+      "cpu": {
+        "critical": 90,
+        "warning": 70
+      },
+      "memory": {
+        "critical": 90,
+        "warning": 75
+      },
+      "disk": {
+        "critical": 95,
+        "warning": 85
+      },
+      "temperature": {
+        "critical": 85,
+        "warning": 70
+      }
+    },
+    
+    "session_thresholds": {
+      "error_rate": {
+        "critical": 0.3,
+        "warning": 0.1
+      },
+      "health_score": {
+        "critical": 30,
+        "warning": 50
+      },
+      "response_time": {
+        "critical": 10,
+        "warning": 5
+      },
+      "session_age": {
+        "inactive_days": 7,
+        "old_days": 30
+      }
     },
     
     "alerting": {
       "enabled": true,
-      "providers": ["log", "telegram"],  // log, email, telegram, webhook
-      
-      "thresholds": {
-        "cpu_critical": 90,
-        "cpu_warning": 70,
-        "memory_critical": 90,
-        "memory_warning": 75,
-        "disk_critical": 95,
-        "disk_warning": 85,
-        "error_rate_critical": 0.3,
-        "error_rate_warning": 0.1
-      },
-      
-      "alert_cooldown_minutes": 15,
+      "providers": ["log", "telegram"],
       "escalation_rules": [
         {
           "level": "warning",
@@ -265,8 +206,20 @@
       ]
     },
     
+    "health_check": {
+      "enabled": true,
+      "interval_seconds": 60,
+      "checks": [
+        "session_health",
+        "system_resources",
+        "network_latency",
+        "error_rates",
+        "response_times"
+      ]
+    },
+    
     "logging": {
-      "level": "INFO",  // DEBUG, INFO, WARNING, ERROR
+      "level": "INFO",
       "format": "json",
       "enable_audit_log": true,
       "log_sensitive_data": false,
@@ -275,67 +228,112 @@
         "backup_count": 5,
         "compress_old_logs": true
       }
+    },
+    
+    "auto_remediation": {
+      "enabled": false,
+      "actions": [
+        {
+          "condition": "no_active_sessions",
+          "action": "create_emergency_session",
+          "require_confirmation": true
+        },
+        {
+          "condition": "high_cpu_usage",
+          "action": "increase_check_interval",
+          "parameters": {
+            "increase_by_seconds": 60,
+            "max_interval": 600
+          }
+        }
+      ]
+    },
+    
+    "metrics_storage": {
+      "storage_directory": "monitor_data",
+      "compression_enabled": true,
+      "backup_metrics": true,
+      "cleanup_interval_hours": 24
     }
   },
   
-  "rate_limiting_throttling": {
-    "rate_limiting": {
-      "enabled": true,
-      "strategy": "token_bucket",
-      
-      "limits": {
-        "requests_per_minute": 60,
-        "requests_per_hour": 1000,
-        "concurrent_connections": 10,
-        "burst_size": 15
-      },
-      
-      "by_session": true,
-      "by_user": true,
-      "by_ip": true
+  "shared_security_settings": {
+    "file_permissions": {
+      "session_files": 600,
+      "config_files": 600,
+      "backup_files": 600,
+      "log_files": 640,
+      "monitor_data": 700
     },
     
-    "throttling": {
-      "enabled": true,
-      "slow_request_threshold_ms": 5000,
-      "degraded_mode_threshold": 0.3,
-      "backoff_strategy": "exponential",
-      "max_backoff_seconds": 60
+    "sensitive_data": {
+      "mask_phone_numbers": true,
+      "mask_api_keys": true,
+      "hash_identifiers": true,
+      "anonymize_logs": true,
+      "pseudonymize_user_ids": true
     },
     
-    "circuit_breaker": {
-      "enabled": true,
-      "failure_threshold": 5,
-      "reset_timeout_seconds": 60,
-      "half_open_max_attempts": 3
-    }
-  },
-  
-  "compliance_privacy": {
     "data_retention": {
       "session_data_days": 30,
       "log_data_days": 90,
       "backup_data_days": 30,
+      "monitor_metrics_days": 30,
       "auto_purge_enabled": true,
       "secure_deletion": true
     },
     
-    "privacy": {
-      "anonymize_logs": true,
-      "pseudonymize_user_ids": true,
-      "data_minimization": true,
-      "right_to_be_forgotten": true
-    },
-    
-    "compliance": {
-      "gdpr_compliant": true,
-      "encrypt_data_at_rest": true,
-      "encrypt_data_in_transit": true,
-      "access_logging": true
+    "access_control": {
+      "require_authentication": true,
+      "admin_users": [],
+      "allowed_ips": [],
+      "rate_limit_admin_operations": true
     }
   },
   
-  "maintenance": {
+  "telethon_client_settings": {
+    "connection": {
+      "timeout": 30,
+      "request_retries": 3,
+      "connection_retries": 3,
+      "auto_reconnect": true,
+      "use_ipv6": false
+    },
+    
+    "device_simulation": {
+      "enabled": true,
+      "device_pool": [
+        {
+          "device_model": "Samsung Galaxy S24 Ultra",
+          "system_version": "Android 14",
+          "app_version": "10.5.0",
+          "device_type": "android"
+        },
+        {
+          "device_model": "Google Pixel 8 Pro",
+          "system_version": "Android 14",
+          "app_version": "10.4.2",
+          "device_type": "android"
+        },
+        {
+          "device_model": "iPhone 15 Pro Max",
+          "system_version": "iOS 17.2",
+          "app_version": "10.5.1",
+          "device_type": "ios"
+        }
+      ],
+      "rotation_strategy": "sequential"
+    },
+    
+    "proxy_settings": {
+      "enabled": false,
+      "proxy_list": [],
+      "rotation_interval": 3600,
+      "test_proxies": true
+    }
+  },
+  
+  "maintenance_settings": {
     "maintenance_window": {
       "enabled": true,
       "day": "sunday",
@@ -346,12 +344,12 @@
     
     "auto_maintenance": {
       "cleanup_interval_hours": 24,
-      "vacuum_database": true,
       "optimize_storage": true,
+      "vacuum_databases": true,
       "health_check_after_maintenance": true
     },
     
-    "update_strategy": {
+    "update_management": {
       "auto_update_config": false,
       "backup_before_update": true,
       "rollback_on_failure": true,
@@ -359,38 +357,19 @@
     }
   },
   
-  "advanced_features": {
-    "multi_tenancy": {
-      "enabled": false,
-      "isolation_level": "session",  // process, session, data
-      "resource_quota_per_tenant": {}
-    },
-    
-    "load_balancing": {
-      "enabled": false,
-      "algorithm": "round_robin",
-      "health_check": true,
-      "failover": true
-    },
-    
-    "disaster_recovery": {
-      "enabled": true,
-      "backup_location": "local",  // local, cloud, hybrid
-      "recovery_time_objective_minutes": 15,
-      "recovery_point_objective_hours": 1,
-      "dr_test_interval_days": 30
-    },
-    
-    "analytics": {
-      "enabled": true,
-      "collect_metrics": true,
-      "anonymize_data": true,
-      "retention_days": 90,
-      "export_format": "json"
+  "disaster_recovery": {
+    "enabled": true,
+    "backup_locations": ["local"],
+    "recovery_time_objective_minutes": 15,
+    "recovery_point_objective_hours": 1,
+    "dr_test_interval_days": 30,
+    "backup_verification": {
+      "test_restore_weekly": true,
+      "validate_backups_on_start": true
     }
   },
   
-  "debugging_troubleshooting": {
+  "debugging_settings": {
     "debug_mode": false,
     "verbose_logging": false,
     "enable_profiling": false,
@@ -406,8 +385,66 @@
     "troubleshooting": {
       "auto_capture_state_on_error": true,
       "state_capture_interval_hours": 1,
-      "enable_remote_debugging": false,
-      "debug_port": 5678
+      "enable_remote_debugging": false
+    }
+  },
+  
+  "environment_specific_overrides": {
+    "development": {
+      "session_manager_settings.encryption.enabled": false,
+      "session_manager_settings.rate_limiting.enabled": false,
+      "session_monitor_settings.monitoring.check_interval_seconds": 60,
+      "session_monitor_settings.logging.level": "DEBUG",
+      "debugging_settings.debug_mode": true
+    },
+    
+    "staging": {
+      "session_manager_settings.encryption.enabled": true,
+      "session_manager_settings.backup.count": 5,
+      "session_monitor_settings.alerting.providers": ["log"],
+      "session_monitor_settings.auto_remediation.enabled": false
+    },
+    
+    "production": {
+      "session_manager_settings.encryption.enabled": true,
+      "session_manager_settings.backup.count": 15,
+      "session_monitor_settings.alerting.providers": ["log", "telegram"],
+      "session_monitor_settings.auto_remediation.enabled": false,
+      "debugging_settings.debug_mode": false,
+      "shared_security_settings.access_control.require_authentication": true
+    }
+  },
+  
+  "feature_flags": {
+    "enable_advanced_metrics": true,
+    "enable_anomaly_detection": true,
+    "enable_predictive_rotation": false,
+    "enable_multi_tenancy": false,
+    "enable_load_balancing": false,
+    "enable_analytics_dashboard": true
+  },
+  
+  "integration_settings": {
+    "external_services": {
+      "telegram_bot_token": "",
+      "email_notifications": {
+        "enabled": false,
+        "smtp_server": "",
+        "sender_email": "",
+        "recipients": []
+      },
+      "webhook_endpoints": [],
+      "prometheus_metrics": {
+        "enabled": false,
+        "port": 9090
+      }
+    },
+    
+    "api_endpoints": {
+      "health_check": "/health",
+      "metrics": "/metrics",
+      "session_info": "/sessions",
+      "admin": "/admin"
     }
   }
 }
