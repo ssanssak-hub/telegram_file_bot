@@ -1,4 +1,18 @@
 {
+    "bot_token": "YOUR_BOT_TOKEN_HERE",
+    "admins": [123456789],
+    "required_channels": [],
+    "payment_gateway": "test",
+    "max_file_size": 2000,
+    "daily_download_limit": 10,
+    "backup_enabled": true,
+    "rate_limits": {
+        "download": 10,
+        "search": 30,
+        "upload": 5
+    }
+}
+{
   "bot": {
     "enabled": true,
     "token": "YOUR_BOT_TOKEN_HERE",
