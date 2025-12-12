@@ -1,160 +1,138 @@
-#requirements.txt
-telethon==1.34.0
-pyTelegramBotAPI==4.18.0
-pysqlite3==0.5.2
-
-# برای مدیریت session
-cryptography==41.0.7
-psutil==5.9.6
-gunicorn==21.2.0
-python-dotenv==1.0.0
-
-# برای فشرده‌سازی
-gzip==1.0.0
-brotli==1.1.0
-
-# برای مانیتورینگ
-prometheus-client==0.19.0
-grafana-api==1.0.3
-
-# پایه‌ای
-telethon==1.34.0
-pyTelegramBotAPI==4.18.0
-
-
-# برای دانلود/آپلود سریع
-aiohttp==3.9.1
-aiofiles==23.2.1
-httpx[http2]==0.25.1
-uvloop==0.19.0
-
-# برای فشرده‌سازی
-brotli==1.1.0
-zstandard==0.22.0
-lz4==4.3.2
-
-# برای بهینه‌سازی
-psutil==5.9.6
-speedtest-cli==2.1.3
-python-dotenv==1.0.0
-
-# برای موازی‌سازی
-concurrent-futures==1.0.0
-joblib==1.3.2
-ray==2.9.0
-
-# برای کش
-redis==5.0.1
-pymemcache==4.0.0
-
-# پایه
-telethon==1.34.0
-pyTelegramBotAPI==4.18.0
-
-
+# همه dependencyها در یک فایل (حجم زیاد)
 
 # Core
-python>=3.8
+python>=3.8,<3.12
+asyncio>=3.4.3
 
-# Telegram Libraries
+# Telegram
 telethon==1.34.0
-pyTelegramBotAPI==4.18.0
-telegram==0.0.1
+python-telegram-bot==20.7
+aiogram==3.1.1
 
-# Database
-sqlalchemy==2.0.23
-alembic==1.13.1
-aiosqlite==0.19.0
-redis==5.0.1
-
-# Web (Optional)
-flask==3.0.0
-flask-cors==4.0.0
-flask-sqlalchemy==3.1.1
-flask-login==0.6.3
-flask-admin==1.6.1
-
-# Speed Optimization
+# Async
 aiohttp==3.9.1
 aiofiles==23.2.1
 httpx[http2]==0.25.1
 uvloop==0.19.0
+aioquic==0.9.23
+dnspython==2.4.2
+
+# Database
+aiosqlite==0.19.0
+sqlalchemy==2.0.23
+redis==5.0.1
+msgpack==1.0.7
+alembic==1.13.1
 
 # Compression
 brotli==1.1.0
 zstandard==0.22.0
 lz4==4.3.2
 
-# Utilities
-python-dotenv==1.0.0
-psutil==5.9.6
+# Security
 cryptography==41.0.7
-pillow==10.2.0
-requests==2.31.0
+python-dotenv==1.0.0
+
+# AI/ML
+torch==2.1.2
+torchvision==0.16.2
+--find-links https://download.pytorch.org/whl/torch_stable.html
+numpy==1.26.2
+scikit-learn==1.3.2
+pandas==2.1.4
+joblib==1.3.2
+tensorflow==2.13.1
+
+# Config
+pydantic==2.5.2
+pydantic-settings==2.1.0
+pyyaml==6.0.1
+tomli==2.0.1
+watchdog==3.0.0
 
 # Monitoring
 prometheus-client==0.19.0
-grafana-api==1.0.3
+psutil==5.9.6
+colorlog==6.8.0
 
-# Testing
+# API
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+jinja2==3.1.2
+python-multipart==0.0.6
+flask==3.0.0
+flask-cors==4.0.0
+flask-admin==1.6.1
+
+# Utilities
+pillow==10.1.0
+requests==2.31.0
+click==8.1.7
+tqdm==4.66.1
+humanize==4.9.0
+gunicorn==21.2.0
+speedtest-cli==2.1.3
+
+# Development - Testing
 pytest==7.4.3
 pytest-asyncio==0.21.1
 pytest-cov==4.1.0
+pytest-mock==3.12.0
+pytest-xdist==3.5.0
 
-# Development
+# Development - Code Quality
 black==23.11.0
 flake8==6.1.0
 mypy==1.7.1
+isort==5.12.0
+autopep8==2.0.4
 pre-commit==3.5.0
 
+# Development - Security
+bandit==1.7.5
+safety==2.3.5
 
-# Core dependencies
-aiohttp>=3.9.0
-aiofiles>=23.2.0
-asyncio>=3.4.3
+# Development - Debugging
+ipython==8.17.2
+ipdb==0.13.13
+debugpy==1.8.0
+py-spy==0.3.14
+memory-profiler==0.61.0
+line-profiler==4.1.2
 
-# AI & Machine Learning
-torch>=2.0.0
-tensorflow>=2.13.0
-numpy>=1.24.0
-scikit-learn>=1.3.0
-pandas>=2.0.0
+# Development - Documentation
+sphinx==7.2.6
+sphinx-rtd-theme==1.3.0
+sphinx-autodoc-typehints==1.25.1
 
-# Compression
-brotli>=1.1.0
-zstandard>=0.21.0
-lz4>=4.3.0
+# Development - IDE
+jedi==0.19.0
+rope==1.8.0
 
-# Cryptography
-cryptography>=41.0.0
+# Optional - Cloud
+boto3==1.34.0
+google-cloud-storage==2.13.0
 
-# Monitoring & Metrics
-prometheus-client>=0.18.0
-psutil>=5.9.0
+# Optional - File Processing
+pypdf==3.17.0
+python-pptx==0.6.23
+openpyxl==3.1.2
 
-# Networking
-aioquic>=0.9.0
-dnspython>=2.4.0
+# Optional - Communication
+qrcode==7.4.2
+phonenumbers==8.13.27
+python-magic==0.4.27
 
-# Configuration
-pydantic>=2.0.0
-pyyaml>=6.0
-tomli>=2.0.0
-watchdog>=3.0.0
+# Optional - Reporting
+reportlab==4.0.8
+matplotlib==3.8.2
+seaborn==0.13.0
 
-# Telegram Bot
-python-telegram-bot>=20.0
+# Optional - Network
+paramiko==3.4.0
+pysftp==0.2.9
 
-# API Server
-fastapi>=0.100.0
-uvicorn>=0.23.0
-
-# Utilities
-msgpack>=1.0.0
-colorlog>=6.7.0
-
-# Development
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
-black>=23.0.0
-mypy>=1.5.0
+# Compatibility
+telegram==0.0.1
+pysqlite3==0.5.2
+typing-extensions==4.8.0
