@@ -1295,11 +1295,15 @@ class AdvancedSessionMonitor:
 # ============================================
 # تابع اصلی و CLI
 # ============================================
-
-async def create_monitor(config: Optional[MonitorConfig] = None,
-                        session_manager = None) -> AdvancedSessionMonitor:
-    """ایجاد instance از مانیتور"""
-    monitor = AdvancedSessionMonitor(config=config, session_manager=session_manager)
+async def create_monitor(session_manager=None):
+    """ایجاد monitor با کانفیگ"""
+    config_loader = load_config()
+    monitor_config = config_loader.get_session_monitor_config()
+    
+    monitor = AdvancedSessionMonitor(
+        config=monitor_config,
+        session_manager=session_manager
+    )
     return monitor
 
 async def main():
