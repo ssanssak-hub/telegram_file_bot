@@ -10,7 +10,8 @@ from typing import Dict, List, Optional, Tuple
 import logging
 from dataclasses import dataclass
 from enum import Enum
-
+# در bot_with_limits.py باید این import اضافه شود:
+from limits_manager import LimitsManager, LimitType
 logger = logging.getLogger(__name__)
 
 class LimitType(Enum):
