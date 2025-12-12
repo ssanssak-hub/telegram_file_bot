@@ -1,77 +1,340 @@
 {
-  "bot_token": "YOUR_BOT_TOKEN_HERE",
-  "admins": [123456789],
-  "required_channels": ["@your_channel"],
-  "settings": {
-    "daily_download_limit": 10,
-    "max_file_size": 2000,
-    "broadcast_delay": 1,
-    "welcome_message": "به ربات ما خوش آمدید!"
-  }
-}
-
-
-{
-  "enabled": true,
-  "token": "YOUR_BOT_TOKEN_HERE",
-  "api_id": 1234567,
-  "api_hash": "YOUR_API_HASH_HERE",
-  
-  "bot_settings": {
-    "parse_mode": "HTML",
-    "disable_web_page_preview": true,
-    "timeout": 30,
-    "max_connections": 100,
-    "allowed_updates": ["message", "callback_query"]
-  },
-  
-  "admins": [123456789],
-  "allowed_users": [],
-  
-  "channels": {
-    "main_channel": "@your_channel",
-    "support_channel": "@support_channel",
-    "log_channel": "@log_channel"
+  "bot": {
+    "enabled": true,
+    "token": "YOUR_BOT_TOKEN_HERE",
+    "api_id": 1234567,
+    "api_hash": "YOUR_API_HASH_HERE",
+    
+    "settings": {
+      "parse_mode": "HTML",
+      "disable_web_page_preview": true,
+      "timeout": 30,
+      "max_connections": 100,
+      "allowed_updates": ["message", "callback_query", "chat_member", "my_chat_member"],
+      "skip_pending": false,
+      "skip_updates_delay": 1
+    },
+    
+    "admins": [123456789],
+    "allowed_users": [],
+    
+    "welcome_message": "👋 به ربات ما خوش آمدید!\n\nمن ربات مدیریت دانلود و آپلود هستم. می‌توانید فایل‌ها را با سرعت بالا دانلود کرده و محدودیت‌های هوشمند را مدیریت کنید.",
+    
+    "channels": {
+      "main_channel": "@your_channel",
+      "support_channel": "@support_channel",
+      "log_channel": "@log_channel",
+      "news_channel": "@news_channel",
+      "required_channels": ["@your_channel", "@support_channel"]
+    }
   },
   
   "limits": {
-    "daily_downloads": 10,
-    "max_file_size_mb": 500,
-    "concurrent_downloads": 3,
-    "user_storage_gb": 1
+    "tiers": {
+      "free": {
+        "daily_downloads": 10,
+        "total_downloads": 100,
+        "max_file_size_mb": 500,
+        "concurrent_downloads": 3,
+        "bandwidth_gb_per_month": 10,
+        "storage_gb": 0.5,
+        "api_requests_per_minute": 30
+      },
+      "premium": {
+        "daily_downloads": 50,
+        "total_downloads": 1000,
+        "max_file_size_mb": 2000,
+        "concurrent_downloads": 5,
+        "bandwidth_gb_per_month": 100,
+        "storage_gb": 5,
+        "api_requests_per_minute": 100
+      },
+      "vip": {
+        "daily_downloads": 200,
+        "total_downloads": 10000,
+        "max_file_size_mb": 5000,
+        "concurrent_downloads": 10,
+        "bandwidth_gb_per_month": 500,
+        "storage_gb": 20,
+        "api_requests_per_minute": 300
+      }
+    },
+    
+    "global_limits": {
+      "max_users": 5000,
+      "max_files": 10000,
+      "max_concurrent_downloads": 50,
+      "max_bandwidth_gb_per_day": 1000,
+      "max_storage_gb": 200
+    },
+    
+    "reset_times": {
+      "daily_reset_hour": 0,
+      "monthly_reset_day": 1,
+      "timezone": "Asia/Tehran"
+    },
+    
+    "grace_periods": {
+      "warning_threshold": 0.8,
+      "soft_limit_threshold": 0.95,
+      "hard_limit_threshold": 1.0
+    }
   },
   
   "features": {
-    "auto_download": true,
-    "auto_upload": true,
-    "compression": true,
-    "watermark": false,
-    "virus_scan": true
+    "download": {
+      "enabled": true,
+      "max_workers": 5,
+      "chunk_size_mb": 1,
+      "resume_support": true,
+      "speed_limit_kbps": 0,
+      "timeout_seconds": 300
+    },
+    
+    "upload": {
+      "enabled": true,
+      "max_size_mb": 2000,
+      "allowed_formats": [".jpg", ".png", ".pdf", ".mp4", ".mp3", ".zip", ".rar", ".txt", ".docx", ".xlsx"],
+      "auto_compress": true,
+      "compression_level": 6
+    },
+    
+    "processing": {
+      "auto_watermark": false,
+      "watermark_text": "@your_bot",
+      "virus_scan": true,
+      "hash_calculation": true,
+      "metadata_extraction": true
+    },
+    
+    "notifications": {
+      "download_complete": true,
+      "limit_warning": true,
+      "subscription_expiry": true,
+      "system_alerts": true,
+      "promotional_messages": false
+    },
+    
+    "ui": {
+      "progress_bar_enabled": true,
+      "speed_display_enabled": true,
+      "eta_calculation_enabled": true,
+      "dark_mode": false,
+      "language": "fa"
+    }
+  },
+  
+  "payment": {
+    "enabled": true,
+    "currency": "IRT",
+    "provider": "zarinpal",
+    "test_mode": true,
+    
+    "prices": {
+      "premium_monthly": 50000,
+      "premium_yearly": 500000,
+      "vip_monthly": 150000,
+      "vip_yearly": 1500000
+    },
+    
+    "discounts": {
+      "new_user_percent": 10,
+      "referral_percent": 15,
+      "seasonal_discounts": {}
+    },
+    
+    "callback_url": "https://yourdomain.com/payment/callback",
+    "merchant_id": "YOUR_MERCHANT_ID"
   },
   
   "security": {
     "require_join_channel": true,
     "captcha_enabled": false,
-    "rate_limit_per_minute": 20,
-    "max_message_length": 4000
+    "rate_limiting": {
+      "messages_per_minute": 20,
+      "commands_per_minute": 10,
+      "downloads_per_minute": 3,
+      "api_requests_per_minute": 60
+    },
+    
+    "validation": {
+      "max_message_length": 4000,
+      "min_username_length": 3,
+      "allowed_characters": "a-zA-Z0-9_@.-",
+      "spam_protection": true
+    },
+    
+    "encryption": {
+      "enabled": true,
+      "algorithm": "AES-256-GCM",
+      "key_rotation_days": 30
+    }
   },
   
   "database": {
     "type": "sqlite",
     "path": "data/database.db",
-    "backup_interval_hours": 24
+    
+    "backup": {
+      "enabled": true,
+      "interval_hours": 6,
+      "keep_days": 7,
+      "compress": true
+    },
+    
+    "optimization": {
+      "vacuum_daily": true,
+      "cache_size_mb": 100,
+      "journal_mode": "WAL"
+    },
+    
+    "tables": {
+      "users": "users",
+      "files": "files",
+      "downloads": "downloads",
+      "payments": "payments",
+      "subscriptions": "subscriptions",
+      "logs": "logs"
+    }
   },
   
   "logging": {
     "level": "INFO",
-    "file": "logs/bot.log",
-    "max_size_mb": 10,
-    "backup_count": 5
+    "levels": {
+      "telegram": "WARNING",
+      "urllib3": "WARNING",
+      "asyncio": "WARNING"
+    },
+    
+    "handlers": {
+      "file": {
+        "enabled": true,
+        "path": "logs/bot.log",
+        "max_size_mb": 10,
+        "backup_count": 5,
+        "encoding": "utf-8"
+      },
+      
+      "console": {
+        "enabled": true,
+        "format": "colored",
+        "show_thread": false
+      },
+      
+      "telegram": {
+        "enabled": true,
+        "chat_id": -1001234567890,
+        "level": "ERROR"
+      }
+    },
+    
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "date_format": "%Y-%m-%d %H:%M:%S"
   },
   
   "server": {
+    "enabled": false,
     "host": "0.0.0.0",
     "port": 8080,
-    "webhook_url": "https://yourdomain.com/webhook"
+    "webhook_url": "https://yourdomain.com/webhook",
+    
+    "api": {
+      "enabled": true,
+      "rate_limit_per_minute": 100,
+      "require_auth": true,
+      "cors_origins": ["*"],
+      "docs_enabled": true
+    },
+    
+    "monitoring": {
+      "enabled": true,
+      "metrics_port": 9090,
+      "health_check_path": "/health",
+      "prometheus_enabled": true
+    }
+  },
+  
+  "performance": {
+    "thread_pool_size": 10,
+    "download_buffer_size_kb": 8192,
+    "max_memory_usage_mb": 512,
+    "cache_ttl_seconds": 300,
+    
+    "optimization": {
+      "connection_pooling": true,
+      "query_caching": true,
+      "lazy_loading": true
+    }
+  },
+  
+  "backup": {
+    "enabled": true,
+    "schedule": "0 2 * * *",
+    "location": "backups/",
+    "encrypt": true,
+    
+    "retention": {
+      "daily": 7,
+      "weekly": 4,
+      "monthly": 6
+    },
+    
+    "items": [
+      "database",
+      "config",
+      "logs",
+      "user_files"
+    ]
+  },
+  
+  "maintenance": {
+    "cleanup_interval_hours": 24,
+    "temp_files_max_age_hours": 24,
+    "inactive_user_days": 30,
+    "orphaned_files_days": 7,
+    
+    "tasks": {
+      "optimize_database": true,
+      "clean_temp_files": true,
+      "remove_inactive_users": false,
+      "update_statistics": true
+    }
+  },
+  
+  "integrations": {
+    "telegram": {
+      "max_file_size_mb": 2000,
+      "max_message_length": 4096,
+      "supported_formats": ["document", "video", "audio", "photo", "voice"]
+    },
+    
+    "cloud_storage": {
+      "enabled": false,
+      "provider": "s3",
+      "bucket": "your-bucket",
+      "region": "us-east-1",
+      "cdn_enabled": false
+    },
+    
+    "ai_services": {
+      "virus_scan_api": "",
+      "content_moderation_api": "",
+      "ocr_api": "",
+      "translation_api": ""
+    }
+  },
+  
+  "version": "2.0.0",
+  "environment": "production",
+  "debug": false,
+  
+  "metadata": {
+    "author": "Your Name",
+    "contact": "@your_username",
+    "website": "https://yourdomain.com",
+    "github": "https://github.com/yourusername/yourbot",
+    "license": "MIT",
+    "created_at": "2024-01-01",
+    "updated_at": "2024-01-15"
   }
 }
