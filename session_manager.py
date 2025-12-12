@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# session_manager.py - سیستم مدیریت session ایمن برای UserBot
+# session_manager_advanced.py - سیستم مدیریت session ایمن و پیشرفته برای UserBot
+# Version: 2.0.0
 
 import asyncio
 import json
@@ -7,594 +8,1288 @@ import os
 import hashlib
 import secrets
 import time
+import re
+import base64
+import hmac
+import zlib
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, Callable
+from dataclasses import dataclass, asdict
+from enum import Enum
 import logging
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import pickle
+import struct
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import aiofiles
+import psutil
+import socket
+import uuid
+from contextlib import asynccontextmanager
 
+# تنظیمات لاگ پیشرفته
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - [%(levelname)s] - [Thread:%(thread)d] - %(message)s',
+    handlers=[
+        RotatingFileHandler(
+            'secure_session_manager.log',
+            maxBytes=10*1024*1024,  # 10MB
+            backupCount=5,
+            encoding='utf-8'
+        ),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
+
+# ============================================
+# مدل‌های داده (Data Models)
+# ============================================
+
+class SessionStatus(Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    SUSPENDED = "suspended"
+    EXPIRED = "expired"
+    ERROR = "error"
+    PENDING = "pending"
+
+class DeviceType(Enum):
+    ANDROID = "android"
+    IOS = "ios"
+    DESKTOP = "desktop"
+    WEB = "web"
+
+@dataclass
+class DeviceInfo:
+    device_model: str
+    system_version: str
+    app_version: str
+    lang_code: str = "en"
+    system_lang_code: str = "en-US"
+    device_type: DeviceType = DeviceType.ANDROID
+    manufacturer: str = ""
+    screen_resolution: str = "1080x1920"
+    dpi: int = 420
+    ram_size: int = 4096  # MB
+    storage_size: int = 128  # GB
+    cpu_cores: int = 8
+    unique_id: str = ""
+
+@dataclass
+class LocationInfo:
+    ip: str
+    country: str
+    city: str
+    timezone: str = "UTC"
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    isp: str = ""
+    asn: str = ""
+    proxy_type: Optional[str] = None
+
+@dataclass
+class SessionMetrics:
+    requests_count: int = 0
+    success_count: int = 0
+    error_count: int = 0
+    total_bytes_sent: int = 0
+    total_bytes_received: int = 0
+    average_response_time: float = 0.0
+    last_request_time: Optional[datetime] = None
+    consecutive_errors: int = 0
+    health_score: float = 100.0  # امتیاز سلامت (0-100)
+
+@dataclass
+class SessionConfig:
+    max_sessions: int = 5
+    session_lifetime_hours: int = 168  # 7 days
+    auto_rotate: bool = True
+    rotate_after_errors: int = 5
+    rotate_after_requests: int = 1000
+    backup_count: int = 10
+    encryption_enabled: bool = True
+    compression_enabled: bool = True
+    geo_diversity: bool = True
+    device_rotation: bool = True
+    use_proxy_pool: bool = False
+    enable_metrics: bool = True
+    enable_health_check: bool = True
+    session_timeout_seconds: int = 300
+    max_concurrent_requests: int = 10
+    rate_limit_per_minute: int = 60
+
+# ============================================
+# سیستم رمزنگاری پیشرفته
+# ============================================
+
+class AdvancedEncryption:
+    """سیستم رمزنگاری پیشرفته با چند لایه امنیتی"""
+    
+    def __init__(self, master_key: Optional[str] = None):
+        self.master_key = master_key or self._generate_master_key()
+        self.derived_keys = {}
+        
+    @staticmethod
+    def _generate_master_key() -> str:
+        """تولید کلید اصلی از entropy سیستم"""
+        system_entropy = str(psutil.cpu_percent()) + str(psutil.virtual_memory().available)
+        process_entropy = str(os.getpid()) + str(threading.get_ident())
+        time_entropy = str(time.time_ns())
+        
+        combined = system_entropy + process_entropy + time_entropy
+        return hashlib.sha512(combined.encode()).hexdigest()
+    
+    def derive_key(self, salt: bytes, purpose: str = "session") -> bytes:
+        """استخراج کلید از کلید اصلی با PBKDF2"""
+        if purpose in self.derived_keys:
+            return self.derived_keys[purpose]
+        
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+        )
+        key = kdf.derive(self.master_key.encode())
+        self.derived_keys[purpose] = key
+        return key
+    
+    def encrypt_data(self, data: bytes, session_id: str) -> bytes:
+        """رمزگذاری داده با AES-GCM"""
+        salt = os.urandom(16)
+        key = self.derive_key(salt, f"enc_{session_id}")
+        
+        aesgcm = AESGCM(key)
+        nonce = os.urandom(12)
+        
+        encrypted = aesgcm.encrypt(nonce, data, None)
+        
+        # ترکیب salt + nonce + encrypted
+        result = salt + nonce + encrypted
+        return base64.b64encode(result)
+    
+    def decrypt_data(self, encrypted_data: bytes, session_id: str) -> bytes:
+        """رمزگشایی داده"""
+        try:
+            data = base64.b64decode(encrypted_data)
+            salt = data[:16]
+            nonce = data[16:28]
+            ciphertext = data[28:]
+            
+            key = self.derive_key(salt, f"enc_{session_id}")
+            aesgcm = AESGCM(key)
+            
+            return aesgcm.decrypt(nonce, ciphertext, None)
+        except Exception as e:
+            logger.error(f"Decryption failed: {e}")
+            raise
+    
+    def create_hmac(self, data: bytes, session_id: str) -> str:
+        """ایجاد HMAC برای احراز اصالت داده"""
+        salt = os.urandom(16)
+        key = self.derive_key(salt, f"hmac_{session_id}")
+        
+        h = hmac.new(key, data, hashlib.sha256)
+        return base64.b64encode(salt + h.digest()).decode()
+
+# ============================================
+# سیستم تشخیص ناهنجاری (Anomaly Detection)
+# ============================================
+
+class AnomalyDetector:
+    """سیستم تشخیص رفتار غیرعادی در session‌ها"""
+    
+    def __init__(self):
+        self.behavior_profiles = {}
+        self.anomaly_threshold = 0.8
+        self.learning_rate = 0.1
+        
+    def create_profile(self, session_id: str, initial_behavior: Dict):
+        """ایجاد پروفایل رفتاری برای session"""
+        self.behavior_profiles[session_id] = {
+            'request_patterns': initial_behavior.get('request_patterns', {}),
+            'timing_stats': initial_behavior.get('timing_stats', {}),
+            'geolocation_history': [],
+            'device_consistency': True,
+            'updated_at': datetime.now()
+        }
+    
+    def detect_anomalies(self, session_id: str, current_behavior: Dict) -> List[str]:
+        """تشخیص ناهنجاری‌های رفتاری"""
+        if session_id not in self.behavior_profiles:
+            return []
+        
+        profile = self.behavior_profiles[session_id]
+        anomalies = []
+        
+        # بررسی الگوی درخواست‌ها
+        request_anomaly = self._check_request_pattern(profile, current_behavior)
+        if request_anomaly:
+            anomalies.append(request_anomaly)
+        
+        # بررسی زمان‌بندی
+        timing_anomaly = self._check_timing_anomaly(profile, current_behavior)
+        if timing_anomaly:
+            anomalies.append(timing_anomaly)
+        
+        # بررسی موقعیت جغرافیایی
+        geo_anomaly = self._check_geolocation_anomaly(profile, current_behavior)
+        if geo_anomaly:
+            anomalies.append(geo_anomaly)
+        
+        # به‌روزرسانی پروفایل
+        if not anomalies:
+            self._update_profile(session_id, current_behavior)
+        
+        return anomalies
+    
+    def _check_request_pattern(self, profile: Dict, current: Dict) -> Optional[str]:
+        """بررسی تغییرات ناگهانی در الگوی درخواست‌ها"""
+        # پیاده‌سازی منطق تشخیص
+        return None
+    
+    def _check_timing_anomaly(self, profile: Dict, current: Dict) -> Optional[str]:
+        """بررسی انحراف در زمان‌بندی"""
+        return None
+    
+    def _check_geolocation_anomaly(self, profile: Dict, current: Dict) -> Optional[str]:
+        """بررسی جابجایی جغرافیایی غیرممکن"""
+        return None
+    
+    def _update_profile(self, session_id: str, new_behavior: Dict):
+        """به‌روزرساری تدریجی پروفایل"""
+        pass
+
+# ============================================
+# سیستم مدیریت Session پیشرفته
+# ============================================
 
 class AdvancedSessionManager:
     """
-    سیستم مدیریت session پیشرفته برای UserBot
-    ویژگی‌ها:
-    - رمزگذاری session‌ها
-    - چرخش خودکار session
-    - بازیابی از خطا
-    - محدودیت امنیتی
-    - لاگ کامل فعالیت‌ها
+    سیستم مدیریت session پیشرفته با قابلیت‌های:
+    - رمزنگاری چندلایه
+    - تشخیص ناهنجاری
+    - مدیریت proxy پویا
+    - مانیتورینگ سلامت
+    - بازیابی خودکار
+    - مقیاس‌پذیری
     """
     
-    def __init__(self, base_dir: Path = Path("sessions")):
+    def __init__(self, 
+                 base_dir: Path = Path("secure_sessions"),
+                 config: Optional[SessionConfig] = None):
+        
         self.base_dir = Path(base_dir)
-        self.sessions_dir = self.base_dir / "telethon_sessions"
+        self.sessions_dir = self.base_dir / "sessions"
         self.backup_dir = self.base_dir / "backups"
-        self.metadata_file = self.base_dir / "session_metadata.json"
+        self.cache_dir = self.base_dir / "cache"
+        self.logs_dir = self.base_dir / "logs"
+        self.metadata_file = self.base_dir / "metadata.enc"
         
-        # ایجاد پوشه‌ها
-        for directory in [self.base_dir, self.sessions_dir, self.backup_dir]:
-            directory.mkdir(exist_ok=True)
+        # ایجاد ساختار پوشه‌ها
+        self._create_directory_structure()
         
-        # کلید رمزگذاری
-        self.key_file = self.base_dir / ".session_key"
-        self.cipher = self._init_encryption()
+        # سیستم‌های اصلی
+        self.encryption = AdvancedEncryption()
+        self.config = config or SessionConfig()
+        self.anomaly_detector = AnomalyDetector()
         
-        # تنظیمات
-        self.config = self._load_config()
-        self.metadata = self._load_metadata()
+        # ذخیره‌سازی داده‌ها
+        self.metadata = self._load_encrypted_metadata()
+        self.active_connections = {}
+        self.session_cache = {}
+        self.rate_limiters = {}
         
-        # لاک برای thread-safe بودن
+        # مدیریت Thread و Async
         self.lock = asyncio.Lock()
+        self.thread_pool = ThreadPoolExecutor(max_workers=10)
+        self.health_check_task = None
         
-        logger.info("AdvancedSessionManager initialized")
-    
-    def _init_encryption(self) -> Optional[Fernet]:
-        """راه‌اندازی سیستم رمزگذاری"""
-        try:
-            if self.key_file.exists():
-                with open(self.key_file, 'rb') as f:
-                    key = f.read()
-            else:
-                key = Fernet.generate_key()
-                with open(self.key_file, 'wb') as f:
-                    f.write(key)
-                # فقط مالک بتواند بخواند
-                self.key_file.chmod(0o600)
-            
-            return Fernet(key)
-        except Exception as e:
-            logger.error(f"Encryption init failed: {e}")
-            return None
-    
-    def _load_config(self) -> Dict:
-        """بارگذاری تنظیمات"""
-        default_config = {
-            'max_sessions': 3,
-            'session_lifetime_hours': 24 * 7,  # 1 week
-            'auto_rotate': True,
-            'rotate_after_errors': 5,
-            'backup_count': 5,
-            'encryption_enabled': True,
-            'compress_sessions': True,
-            'geo_diversity': False,  # ایجاد session از موقعیت‌های مختلف
-            'device_rotation': True,  # چرخش مدل دستگاه
+        # مانیتورینگ
+        self.metrics = {
+            'total_requests': 0,
+            'successful_operations': 0,
+            'failed_operations': 0,
+            'session_rotations': 0,
+            'anomalies_detected': 0,
+            'start_time': datetime.now()
         }
         
-        config_file = self.base_dir / "session_config.json"
-        if config_file.exists():
-            try:
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    user_config = json.load(f)
-                    default_config.update(user_config)
-            except Exception as e:
-                logger.error(f"Error loading config: {e}")
-        
-        # ذخیره config
-        with open(config_file, 'w', encoding='utf-8') as f:
-            json.dump(default_config, f, indent=2)
-        
-        return default_config
+        # شروع سیستم
+        self._start_health_monitor()
+        logger.info(f"AdvancedSessionManager initialized at {self.base_dir}")
     
-    def _load_metadata(self) -> Dict:
-        """بارگذاری متادیتای session‌ها"""
-        if self.metadata_file.exists():
-            try:
-                with open(self.metadata_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except:
-                pass
-        
-        return {
-            'sessions': {},
-            'active_session': None,
-            'rotation_history': [],
-            'error_stats': {},
-            'created_at': datetime.now().isoformat()
-        }
-    
-    def _save_metadata(self):
-        """ذخیره متادیتا"""
-        try:
-            with open(self.metadata_file, 'w', encoding='utf-8') as f:
-                json.dump(self.metadata, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Error saving metadata: {e}")
-    
-    def _generate_session_name(self, prefix: str = "session") -> str:
-        """تولید نام منحصربفرد برای session"""
-        timestamp = int(time.time())
-        random_part = secrets.token_hex(4)
-        return f"{prefix}_{timestamp}_{random_part}"
-    
-    def _encrypt_session_data(self, data: bytes) -> bytes:
-        """رمزگذاری داده‌های session"""
-        if self.cipher and self.config['encryption_enabled']:
-            return self.cipher.encrypt(data)
-        return data
-    
-    def _decrypt_session_data(self, encrypted_data: bytes) -> bytes:
-        """رمزگشایی داده‌های session"""
-        if self.cipher and self.config['encryption_enabled']:
-            return self.cipher.decrypt(encrypted_data)
-        return encrypted_data
-    
-    def _generate_device_info(self, session_num: int = 0) -> Dict:
-        """تولید اطلاعات دستگاه تصادفی"""
-        devices = [
-            {
-                'device_model': 'iPhone 14 Pro',
-                'system_version': 'iOS 16.6',
-                'app_version': '9.4.1',
-                'lang_code': 'en',
-                'system_lang_code': 'en-US'
-            },
-            {
-                'device_model': 'Samsung Galaxy S23',
-                'system_version': 'Android 13',
-                'app_version': '9.4',
-                'lang_code': 'en',
-                'system_lang_code': 'en-US'
-            },
-            {
-                'device_model': 'Xiaomi Redmi Note 12',
-                'system_version': 'Android 12',
-                'app_version': '9.3',
-                'lang_code': 'fa',
-                'system_lang_code': 'fa-IR'
-            },
-            {
-                'device_model': 'Google Pixel 7',
-                'system_version': 'Android 14',
-                'app_version': '9.5',
-                'lang_code': 'en',
-                'system_lang_code': 'en-GB'
-            }
+    def _create_directory_structure(self):
+        """ایجاد ساختار پوشه‌های امن"""
+        directories = [
+            self.base_dir,
+            self.sessions_dir,
+            self.backup_dir,
+            self.cache_dir,
+            self.logs_dir,
+            self.base_dir / "temp",
+            self.base_dir / "reports"
         ]
         
-        if self.config.get('device_rotation', False):
-            return devices[session_num % len(devices)]
-        else:
-            return devices[0]  # ثابت نگه داشتن
+        for directory in directories:
+            directory.mkdir(exist_ok=True, parents=True)
+            # تنظیم مجوزهای امنیتی
+            if os.name != 'nt':  # غیر از ویندوز
+                os.chmod(directory, 0o700)
     
-    async def create_new_session(self, api_id: int, api_hash: str, phone: str = None) -> Dict:
-        """
-        ایجاد session جدید
-        Returns: اطلاعات session ایجاد شده
-        """
+    def _load_encrypted_metadata(self) -> Dict:
+        """بارگذاری متادیتای رمزگذاری شده"""
+        if not self.metadata_file.exists():
+            return {
+                'sessions': {},
+                'active_sessions': [],
+                'rotation_history': [],
+                'error_stats': {},
+                'user_mapping': {},
+                'created_at': datetime.now().isoformat(),
+                'version': '2.0.0'
+            }
+        
+        try:
+            async with aiofiles.open(self.metadata_file, 'rb') as f:
+                encrypted_data = await f.read()
+            
+            decrypted = self.encryption.decrypt_data(encrypted_data, "metadata")
+            return json.loads(decrypted.decode('utf-8'))
+        
+        except Exception as e:
+            logger.error(f"Failed to load metadata: {e}")
+            return self._load_encrypted_metadata()  # بازگشت به مقدار پیش‌فرض
+    
+    async def _save_encrypted_metadata(self):
+        """ذخیره متادیتای رمزگذاری شده"""
         async with self.lock:
             try:
-                # بررسی تعداد session‌ها
-                active_sessions = self._get_active_sessions()
-                if len(active_sessions) >= self.config['max_sessions']:
-                    logger.warning("Max sessions reached, rotating...")
-                    await self.rotate_sessions()
+                data = json.dumps(self.metadata, ensure_ascii=False, default=str).encode('utf-8')
+                encrypted = self.encryption.encrypt_data(data, "metadata")
                 
-                # نام session جدید
-                session_name = self._generate_session_name()
-                session_path = self.sessions_dir / f"{session_name}.session"
+                # ذخیره در فایل موقت و سپس جابجایی (atomic write)
+                temp_file = self.metadata_file.with_suffix('.tmp')
+                async with aiofiles.open(temp_file, 'wb') as f:
+                    await f.write(encrypted)
                 
-                # اطلاعات session
-                session_info = {
-                    'name': session_name,
-                    'path': str(session_path),
-                    'api_id': api_id,
-                    'api_hash': api_hash,
-                    'phone': phone,
-                    'created_at': datetime.now().isoformat(),
-                    'last_used': None,
-                    'usage_count': 0,
-                    'error_count': 0,
-                    'status': 'created',
-                    'device_info': self._generate_device_info(len(active_sessions)),
-                    'location_info': self._generate_location_info(),
-                    'is_active': False
-                }
-                
-                # ذخیره در متادیتا
-                self.metadata['sessions'][session_name] = session_info
-                
-                if not self.metadata['active_session']:
-                    self.metadata['active_session'] = session_name
-                    session_info['is_active'] = True
-                
-                self._save_metadata()
-                
-                logger.info(f"Created new session: {session_name}")
-                return session_info
+                # جابجایی اتمی
+                temp_file.replace(self.metadata_file)
                 
             except Exception as e:
-                logger.error(f"Error creating session: {e}")
-                raise
+                logger.error(f"Failed to save metadata: {e}")
+                await asyncio.sleep(1)
+                await self._save_encrypted_metadata()  # تلاش مجدد
     
-    def _generate_location_info(self) -> Dict:
-        """تولید اطلاعات موقعیت جغرافیایی"""
-        if not self.config.get('geo_diversity', False):
-            return {}
+    def _generate_session_id(self) -> str:
+        """تولید شناسه session منحصربه‌فرد"""
+        timestamp = int(time.time() * 1000)
+        random_bits = secrets.randbits(64)
+        system_id = hashlib.md5(socket.gethostname().encode()).hexdigest()[:8]
+        
+        return f"ses_{timestamp}_{random_bits:016x}_{system_id}"
+    
+    def _generate_device_info(self, session_num: int = 0) -> DeviceInfo:
+        """تولید اطلاعات دستگاه هوشمند"""
+        android_devices = [
+            DeviceInfo(
+                device_model="Samsung Galaxy S24 Ultra",
+                system_version="Android 14",
+                app_version="10.5.0",
+                device_type=DeviceType.ANDROID,
+                manufacturer="Samsung",
+                screen_resolution="1440x3088",
+                dpi=500,
+                ram_size=12000,
+                storage_size=512,
+                cpu_cores=8,
+                unique_id=f"AND-{secrets.token_hex(8)}"
+            ),
+            DeviceInfo(
+                device_model="Google Pixel 8 Pro",
+                system_version="Android 14",
+                app_version="10.4.2",
+                device_type=DeviceType.ANDROID,
+                manufacturer="Google",
+                screen_resolution="1344x2992",
+                dpi=489,
+                ram_size=12000,
+                storage_size=256,
+                cpu_cores=9,
+                unique_id=f"AND-{secrets.token_hex(8)}"
+            ),
+        ]
+        
+        ios_devices = [
+            DeviceInfo(
+                device_model="iPhone 15 Pro Max",
+                system_version="iOS 17.2",
+                app_version="10.5.1",
+                device_type=DeviceType.IOS,
+                manufacturer="Apple",
+                screen_resolution="1290x2796",
+                dpi=460,
+                ram_size=8000,
+                storage_size=512,
+                cpu_cores=6,
+                unique_id=f"IOS-{secrets.token_hex(8)}"
+            ),
+        ]
+        
+        if self.config.device_rotation:
+            all_devices = android_devices + ios_devices
+            return all_devices[session_num % len(all_devices)]
+        
+        return android_devices[0]
+    
+    def _generate_location_info(self) -> Optional[LocationInfo]:
+        """تولید اطلاعات موقعیت جغرافیایی پویا"""
+        if not self.config.geo_diversity:
+            return None
         
         locations = [
-            {'ip': '5.202.192.0', 'country': 'Iran', 'city': 'Tehran'},
-            {'ip': '185.143.223.0', 'country': 'Germany', 'city': 'Frankfurt'},
-            {'ip': '104.244.72.0', 'country': 'USA', 'city': 'New York'},
-            {'ip': '45.95.168.0', 'country': 'Netherlands', 'city': 'Amsterdam'},
+            LocationInfo(
+                ip=f"185.{secrets.randbelow(256)}.{secrets.randbelow(256)}.{secrets.randbelow(256)}",
+                country="Germany",
+                city="Frankfurt",
+                timezone="Europe/Berlin",
+                latitude=50.1109,
+                longitude=8.6821,
+                isp="Deutsche Telekom",
+                asn="AS3320"
+            ),
+            LocationInfo(
+                ip=f"104.{secrets.randbelow(256)}.{secrets.randbelow(256)}.{secrets.randbelow(256)}",
+                country="USA",
+                city="New York",
+                timezone="America/New_York",
+                latitude=40.7128,
+                longitude=-74.0060,
+                isp="DigitalOcean",
+                asn="AS14061"
+            ),
+            LocationInfo(
+                ip=f"5.{secrets.randbelow(256)}.{secrets.randbelow(256)}.{secrets.randbelow(256)}",
+                country="Iran",
+                city="Tehran",
+                timezone="Asia/Tehran",
+                latitude=35.6892,
+                longitude=51.3890,
+                isp="Iran Telecommunication Company",
+                asn="AS58224"
+            ),
         ]
         
         return secrets.choice(locations)
     
-    async def rotate_sessions(self, force: bool = False):
-        """چرخش session‌ها"""
+    async def create_session(self, 
+                           api_id: int, 
+                           api_hash: str,
+                           phone: Optional[str] = None,
+                           user_id: Optional[int] = None,
+                           custom_device: Optional[DeviceInfo] = None) -> Dict[str, Any]:
+        """
+        ایجاد session جدید با تمامی حفاظت‌ها
+        """
         async with self.lock:
             try:
-                active_session = self.metadata.get('active_session')
-                sessions = self.metadata.get('sessions', {})
+                # اعتبارسنجی اولیه
+                await self._validate_create_request(api_id, api_hash, user_id)
                 
-                if not sessions:
-                    logger.warning("No sessions to rotate")
-                    return
+                # تولید شناسه و مسیر
+                session_id = self._generate_session_id()
+                session_path = self.sessions_dir / f"{session_id}.ses"
                 
-                # پیدا کردن session بعدی
-                session_names = list(sessions.keys())
-                if active_session in session_names:
-                    current_index = session_names.index(active_session)
-                    next_index = (current_index + 1) % len(session_names)
-                else:
-                    next_index = 0
-                
-                next_session_name = session_names[next_index]
-                
-                # بررسی نیاز به چرخش
-                if active_session:
-                    current_session = sessions[active_session]
-                    
-                    # بررسی عمر session
-                    created_at = datetime.fromisoformat(current_session['created_at'])
-                    lifetime = datetime.now() - created_at
-                    
-                    should_rotate = (
-                        force or
-                        lifetime.total_seconds() > self.config['session_lifetime_hours'] * 3600 or
-                        current_session['error_count'] >= self.config['rotate_after_errors'] or
-                        self.config['auto_rotate']
-                    )
-                    
-                    if not should_rotate:
-                        logger.debug("No need to rotate sessions yet")
-                        return
-                
-                # انجام چرخش
-                if active_session:
-                    sessions[active_session]['is_active'] = False
-                    sessions[active_session]['last_used'] = datetime.now().isoformat()
-                
-                sessions[next_session_name]['is_active'] = True
-                self.metadata['active_session'] = next_session_name
-                
-                # ثبت در تاریخچه
-                rotation_record = {
-                    'timestamp': datetime.now().isoformat(),
-                    'from': active_session,
-                    'to': next_session_name,
-                    'reason': 'auto_rotate' if not force else 'manual'
+                # اطلاعات session
+                session_info = {
+                    'session_id': session_id,
+                    'path': str(session_path),
+                    'api_id': api_id,
+                    'api_hash': api_hash,
+                    'phone': self._hash_phone(phone) if phone else None,
+                    'user_id': user_id,
+                    'created_at': datetime.now().isoformat(),
+                    'last_used': None,
+                    'status': SessionStatus.ACTIVE.value,
+                    'device_info': asdict(custom_device or self._generate_device_info()),
+                    'location_info': asdict(self._generate_location_info()) if self.config.geo_diversity else {},
+                    'metrics': asdict(SessionMetrics()),
+                    'tags': [],
+                    'custom_data': {},
+                    'security_flags': {
+                        'requires_2fa': False,
+                        'last_password_change': None,
+                        'trusted_device': False
+                    }
                 }
-                self.metadata['rotation_history'].append(rotation_record)
                 
-                # حفظ فقط آخرین 50 رکورد
-                if len(self.metadata['rotation_history']) > 50:
-                    self.metadata['rotation_history'] = self.metadata['rotation_history'][-50:]
+                # ذخیره در متادیتا
+                self.metadata['sessions'][session_id] = session_info
                 
-                self._save_metadata()
+                # نگاشت کاربر
+                if user_id:
+                    if user_id not in self.metadata['user_mapping']:
+                        self.metadata['user_mapping'][user_id] = []
+                    self.metadata['user_mapping'][user_id].append(session_id)
                 
-                logger.info(f"Rotated session: {active_session} -> {next_session_name}")
+                # ذخیره متادیتا
+                await self._save_encrypted_metadata()
                 
-                # پشتیبان‌گیری از session قدیمی
-                if active_session:
-                    await self.backup_session(active_session)
+                # ایجاد پروفایل رفتاری
+                self.anomaly_detector.create_profile(session_id, {})
                 
-                return next_session_name
+                logger.info(f"Session created: {session_id} for user {user_id}")
+                self.metrics['successful_operations'] += 1
+                
+                return session_info
                 
             except Exception as e:
-                logger.error(f"Error rotating sessions: {e}")
+                logger.error(f"Failed to create session: {e}")
+                self.metrics['failed_operations'] += 1
                 raise
     
-    async def backup_session(self, session_name: str):
-        """پشتیبان‌گیری از session"""
+    async def _validate_create_request(self, api_id: int, api_hash: str, user_id: Optional[int]):
+        """اعتبارسنجی درخواست ایجاد session"""
+        
+        # بررسی محدودیت تعداد session
+        if user_id:
+            user_sessions = self.metadata['user_mapping'].get(user_id, [])
+            if len(user_sessions) >= self.config.max_sessions:
+                raise ValueError(f"User {user_id} has reached maximum session limit")
+        
+        # بررسی فرمت api_id و api_hash
+        if not isinstance(api_id, int) or api_id <= 0:
+            raise ValueError("Invalid API ID")
+        
+        if not isinstance(api_hash, str) or len(api_hash) < 10:
+            raise ValueError("Invalid API Hash")
+    
+    def _hash_phone(self, phone: str) -> str:
+        """هش کردن شماره تلفن با salt"""
+        salt = os.urandom(16)
+        phone_bytes = phone.encode()
+        
+        # استفاده از PBKDF2 برای هش کردن
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+        )
+        
+        key = kdf.derive(phone_bytes)
+        return base64.b64encode(salt + key).decode()
+    
+    async def rotate_sessions(self, force: bool = False, reason: str = "auto"):
+        """
+        چرخش هوشمند session‌ها با الگوریتم پیشرفته
+        """
+        async with self.lock:
+            try:
+                active_sessions = [
+                    s for s in self.metadata['sessions'].values()
+                    if s['status'] == SessionStatus.ACTIVE.value
+                ]
+                
+                if not active_sessions:
+                    logger.warning("No active sessions to rotate")
+                    return
+                
+                # الگوریتم انتخاب session برای چرخش
+                session_to_rotate = self._select_session_for_rotation(active_sessions)
+                
+                if not session_to_rotate:
+                    logger.debug("No session needs rotation")
+                    return
+                
+                session_id = session_to_rotate['session_id']
+                
+                # تغییر وضعیت session فعلی
+                self.metadata['sessions'][session_id]['status'] = SessionStatus.INACTIVE.value
+                self.metadata['sessions'][session_id]['rotated_at'] = datetime.now().isoformat()
+                
+                # پشتیبان‌گیری
+                await self._backup_session_advanced(session_id)
+                
+                # انتخاب session جدید (یا ایجاد)
+                new_session_id = await self._select_or_create_new_session(
+                    session_to_rotate, 
+                    active_sessions
+                )
+                
+                # به‌روزرسانی متادیتا
+                rotation_record = {
+                    'timestamp': datetime.now().isoformat(),
+                    'from_session': session_id,
+                    'to_session': new_session_id,
+                    'reason': reason,
+                    'metrics_before': session_to_rotate.get('metrics', {}),
+                    'triggered_by': 'system' if not force else 'manual'
+                }
+                
+                self.metadata['rotation_history'].append(rotation_record)
+                if len(self.metadata['rotation_history']) > 1000:
+                    self.metadata['rotation_history'] = self.metadata['rotation_history'][-1000:]
+                
+                await self._save_encrypted_metadata()
+                
+                logger.info(f"Session rotated: {session_id} -> {new_session_id}")
+                self.metrics['session_rotations'] += 1
+                
+                return new_session_id
+                
+            except Exception as e:
+                logger.error(f"Session rotation failed: {e}")
+                raise
+    
+    def _select_session_for_rotation(self, active_sessions: List[Dict]) -> Optional[Dict]:
+        """الگوریتم انتخاب session برای چرخش"""
+        
+        now = datetime.now()
+        selected_session = None
+        highest_score = 0
+        
+        for session in active_sessions:
+            score = 0
+            
+            # امتیاز بر اساس خطاها
+            metrics = session.get('metrics', {})
+            error_count = metrics.get('error_count', 0)
+            if error_count >= self.config.rotate_after_errors:
+                score += 50
+            
+            # امتیاز بر اساس تعداد درخواست‌ها
+            requests_count = metrics.get('requests_count', 0)
+            if requests_count >= self.config.rotate_after_requests:
+                score += 30
+            
+            # امتیاز بر اساس عمر session
+            created_at = datetime.fromisoformat(session['created_at'])
+            age_hours = (now - created_at).total_seconds() / 3600
+            if age_hours >= self.config.session_lifetime_hours:
+                score += 40
+            
+            # امتیاز بر اساس سلامت
+            health_score = metrics.get('health_score', 100)
+            if health_score < 50:
+                score += 60
+            
+            # انتخاب session با بالاترین امتیاز
+            if score > highest_score:
+                highest_score = score
+                selected_session = session
+        
+        return selected_session if highest_score >= 30 else None
+    
+    async def _backup_session_advanced(self, session_id: str):
+        """پشتیبان‌گیری پیشرفته از session"""
         try:
-            sessions = self.metadata.get('sessions', {})
-            if session_name not in sessions:
+            session_info = self.metadata['sessions'].get(session_id)
+            if not session_info:
                 return
             
-            session_info = sessions[session_name]
             session_path = Path(session_info['path'])
-            
             if not session_path.exists():
                 return
             
-            # نام فایل پشتیبان
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_name = f"{session_name}_{timestamp}.bak"
-            backup_path = self.backup_dir / backup_name
+            # خواندن و رمزگذاری
+            async with aiofiles.open(session_path, 'rb') as f:
+                data = await f.read()
             
-            # کپی فایل session
-            import shutil
-            shutil.copy2(session_path, backup_path)
-            
-            # رمزگذاری پشتیبان
-            if self.config['encryption_enabled']:
-                with open(backup_path, 'rb') as f:
-                    data = f.read()
-                
-                encrypted = self._encrypt_session_data(data)
-                
-                with open(backup_path, 'wb') as f:
-                    f.write(encrypted)
+            encrypted = self.encryption.encrypt_data(data, session_id)
             
             # فشرده‌سازی
-            if self.config['compress_sessions']:
-                import gzip
-                compressed_path = backup_path.with_suffix('.bak.gz')
-                
-                with open(backup_path, 'rb') as f_in:
-                    with gzip.open(compressed_path, 'wb') as f_out:
-                        f_out.write(f_in.read())
-                
-                backup_path.unlink()  # حذف فایل غیرفشرده
-                backup_path = compressed_path
+            if self.config.compression_enabled:
+                compressed = zlib.compress(encrypted, level=9)
+            else:
+                compressed = encrypted
+            
+            # ذخیره پشتیبان با timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            backup_name = f"{session_id}_{timestamp}.backup"
+            backup_path = self.backup_dir / backup_name
+            
+            async with aiofiles.open(backup_path, 'wb') as f:
+                await f.write(compressed)
+            
+            # اضافه کردن metadata به پشتیبان
+            backup_meta = {
+                'session_id': session_id,
+                'backup_time': timestamp,
+                'size_bytes': len(compressed),
+                'checksum': hashlib.sha256(compressed).hexdigest(),
+                'encryption_version': '2.0'
+            }
+            
+            meta_path = backup_path.with_suffix('.meta')
+            async with aiofiles.open(meta_path, 'w') as f:
+                await f.write(json.dumps(backup_meta, indent=2))
             
             # مدیریت تعداد پشتیبان‌ها
-            backups = list(self.backup_dir.glob(f"{session_name}_*.bak*"))
-            backups.sort(key=os.path.getmtime)
-            
-            if len(backups) > self.config['backup_count']:
-                for old_backup in backups[:-self.config['backup_count']]:
-                    old_backup.unlink()
+            await self._cleanup_old_backups(session_id)
             
             logger.debug(f"Backup created: {backup_name}")
             
         except Exception as e:
-            logger.error(f"Error backing up session: {e}")
+            logger.error(f"Backup failed: {e}")
     
-    async def restore_session(self, session_name: str, backup_timestamp: str = None) -> bool:
-        """بازیابی session از پشتیبان"""
+    async def _cleanup_old_backups(self, session_id: str):
+        """پاکسازی پشتیبان‌های قدیمی"""
         try:
-            # یافتن پشتیبان مناسب
-            if backup_timestamp:
-                backup_pattern = f"{session_name}_{backup_timestamp}.bak*"
-            else:
-                # جدیدترین پشتیبان
-                backups = list(self.backup_dir.glob(f"{session_name}_*.bak*"))
-                if not backups:
-                    return False
-                backups.sort(key=os.path.getmtime, reverse=True)
-                backup_path = backups[0]
+            backups = list(self.backup_dir.glob(f"{session_id}_*.backup"))
+            backups.sort(key=lambda x: x.stat().st_mtime, reverse=True)
             
-            backup_path = list(self.backup_dir.glob(backup_pattern))[0]
-            
-            session_info = self.metadata['sessions'][session_name]
-            session_path = Path(session_info['path'])
-            
-            # فشرده‌سازی
-            if backup_path.suffix == '.gz':
-                import gzip
-                with gzip.open(backup_path, 'rb') as f_in:
-                    data = f_in.read()
-            else:
-                with open(backup_path, 'rb') as f:
-                    data = f.read()
-            
-            # رمزگشایی
-            if self.config['encryption_enabled']:
-                data = self._decrypt_session_data(data)
-            
-            # ذخیره session بازیابی شده
-            with open(session_path, 'wb') as f:
-                f.write(data)
-            
-            logger.info(f"Session restored: {session_name} from {backup_path.name}")
-            return True
-            
+            if len(backups) > self.config.backup_count:
+                for old_backup in backups[self.config.backup_count:]:
+                    # حذف فایل پشتیبان و metadata مربوطه
+                    old_backup.unlink()
+                    meta_file = old_backup.with_suffix('.meta')
+                    if meta_file.exists():
+                        meta_file.unlink()
+        
         except Exception as e:
-            logger.error(f"Error restoring session: {e}")
-            return False
+            logger.error(f"Backup cleanup failed: {e}")
     
-    def _get_active_sessions(self) -> List[Dict]:
-        """دریافت session‌های فعال"""
-        return [
-            session for session in self.metadata['sessions'].values()
-            if session.get('is_active', False)
+    async def _select_or_create_new_session(self, old_session: Dict, active_sessions: List[Dict]) -> str:
+        """انتخاب یا ایجاد session جدید"""
+        
+        # اولویت: انتخاب session غیرفعال موجود
+        inactive_sessions = [
+            s for s in self.metadata['sessions'].values()
+            if s['status'] == SessionStatus.INACTIVE.value
+            and s.get('user_id') == old_session.get('user_id')
         ]
+        
+        if inactive_sessions:
+            # انتخاب session با کمترین خطا
+            best_session = min(inactive_sessions, 
+                             key=lambda x: x.get('metrics', {}).get('error_count', 0))
+            best_session['status'] = SessionStatus.ACTIVE.value
+            return best_session['session_id']
+        
+        # اگر session غیرفعالی نبود، ایجاد جدید
+        new_session = await self.create_session(
+            api_id=old_session['api_id'],
+            api_hash=old_session['api_hash'],
+            phone=None,  # شماره از session قدیمی خوانده می‌شود
+            user_id=old_session.get('user_id')
+        )
+        
+        return new_session['session_id']
     
-    async def get_active_session_info(self) -> Optional[Dict]:
-        """دریافت اطلاعات session فعال"""
-        active_name = self.metadata.get('active_session')
-        if not active_name:
+    async def get_session(self, session_id: str, update_stats: bool = True) -> Optional[Dict]:
+        """دریافت اطلاعات session با کش کردن"""
+        
+        # بررسی کش
+        if session_id in self.session_cache:
+            cached = self.session_cache[session_id]
+            if time.time() - cached['timestamp'] < 30:  # 30 ثانیه کش
+                return cached['data']
+        
+        # دریافت از متادیتا
+        session_info = self.metadata['sessions'].get(session_id)
+        if not session_info:
             return None
         
-        sessions = self.metadata.get('sessions', {})
-        return sessions.get(active_name)
-    
-    async def update_session_stats(self, session_name: str, success: bool = True, error_msg: str = None):
-        """به‌روزرسانی آمار session"""
-        async with self.lock:
-            try:
-                sessions = self.metadata.get('sessions', {})
-                if session_name not in sessions:
-                    return
-                
-                session_info = sessions[session_name]
-                session_info['last_used'] = datetime.now().isoformat()
-                session_info['usage_count'] = session_info.get('usage_count', 0) + 1
-                
-                if not success:
-                    session_info['error_count'] = session_info.get('error_count', 0) + 1
-                    session_info['last_error'] = error_msg
-                    session_info['last_error_time'] = datetime.now().isoformat()
-                else:
-                    # ریست شمارش خطا پس از موفقیت‌های متوالی
-                    if session_info.get('error_count', 0) > 0:
-                        session_info['error_count'] = max(0, session_info['error_count'] - 1)
-                
-                self._save_metadata()
-                
-            except Exception as e:
-                logger.error(f"Error updating session stats: {e}")
-    
-    async def cleanup_old_sessions(self):
-        """پاکسازی session‌های قدیمی"""
-        async with self.lock:
-            try:
-                sessions = self.metadata.get('sessions', {}).copy()
-                now = datetime.now()
-                
-                for session_name, session_info in sessions.items():
-                    created_at = datetime.fromisoformat(session_info['created_at'])
-                    age_days = (now - created_at).days
-                    
-                    # شرایط حذف session
-                    should_remove = (
-                        age_days > 30 or  # بیشتر از 30 روز
-                        session_info.get('error_count', 0) > 20 or  # خطاهای زیاد
-                        (not session_info.get('is_active', False) and 
-                         age_days > 7)  # غیرفعال و بیشتر از 7 روز
-                    )
-                    
-                    if should_remove:
-                        # حذف فایل session
-                        session_path = Path(session_info['path'])
-                        if session_path.exists():
-                            session_path.unlink()
-                        
-                        # حذف از متادیتا
-                        del self.metadata['sessions'][session_name]
-                        
-                        # اگر session فعال بود، انتخاب session جدید
-                        if self.metadata.get('active_session') == session_name:
-                            await self.rotate_sessions(force=True)
-                        
-                        logger.info(f"Removed old session: {session_name}")
-                
-                self._save_metadata()
-                
-            except Exception as e:
-                logger.error(f"Error cleaning up sessions: {e}")
-    
-    async def export_session_report(self) -> Dict:
-        """خروجی گزارش کامل session‌ها"""
-        report = {
-            'generated_at': datetime.now().isoformat(),
-            'total_sessions': len(self.metadata.get('sessions', {})),
-            'active_sessions': len(self._get_active_sessions()),
-            'sessions': [],
-            'rotation_history': self.metadata.get('rotation_history', [])[-10:],
-            'backup_count': len(list(self.backup_dir.glob('*.bak*'))),
-            'config': self.config
+        # به‌روزرسانی آمار
+        if update_stats:
+            session_info['last_accessed'] = datetime.now().isoformat()
+            if 'access_count' not in session_info:
+                session_info['access_count'] = 0
+            session_info['access_count'] += 1
+            
+            await self._save_encrypted_metadata()
+        
+        # ذخیره در کش
+        self.session_cache[session_id] = {
+            'data': session_info,
+            'timestamp': time.time()
         }
         
-        for session_name, session_info in self.metadata.get('sessions', {}).items():
-            session_report = {
-                'name': session_name,
-                'is_active': session_info.get('is_active', False),
-                'created_at': session_info.get('created_at'),
-                'last_used': session_info.get('last_used'),
-                'usage_count': session_info.get('usage_count', 0),
-                'error_count': session_info.get('error_count', 0),
-                'status': session_info.get('status', 'unknown'),
-                'device': session_info.get('device_info', {}).get('device_model', 'unknown'),
-                'age_days': (
-                    datetime.now() - datetime.fromisoformat(session_info['created_at'])
-                ).days if 'created_at' in session_info else None
-            }
-            report['sessions'].append(session_report)
-        
-        return report
+        return session_info
     
-    async def validate_sessions(self) -> List[Tuple[str, bool, str]]:
-        """اعتبارسنجی همه session‌ها"""
-        results = []
-        
-        for session_name, session_info in self.metadata.get('sessions', {}).items():
+    async def update_session_metrics(self, session_id: str, success: bool, 
+                                   response_time: float = 0.0, 
+                                   bytes_sent: int = 0, 
+                                   bytes_received: int = 0):
+        """به‌روزرسانی متریک‌های session"""
+        async with self.lock:
             try:
-                session_path = Path(session_info['path'])
+                if session_id not in self.metadata['sessions']:
+                    return
                 
+                session = self.metadata['sessions'][session_id]
+                if 'metrics' not in session:
+                    session['metrics'] = asdict(SessionMetrics())
+                
+                metrics = session['metrics']
+                
+                # به‌روزرسانی مقادیر
+                metrics['requests_count'] += 1
+                
+                if success:
+                    metrics['success_count'] += 1
+                    metrics['consecutive_errors'] = 0
+                else:
+                    metrics['error_count'] += 1
+                    metrics['consecutive_errors'] += 1
+                
+                metrics['total_bytes_sent'] += bytes_sent
+                metrics['total_bytes_received'] += bytes_received
+                
+                # محاسبه میانگین زمان پاسخ
+                if response_time > 0:
+                    old_avg = metrics['average_response_time']
+                    count = metrics['success_count']
+                    metrics['average_response_time'] = (
+                        (old_avg * (count - 1) + response_time) / count
+                        if count > 1 else response_time
+                    )
+                
+                metrics['last_request_time'] = datetime.now().isoformat()
+                
+                # محاسبه امتیاز سلامت
+                metrics['health_score'] = self._calculate_health_score(metrics)
+                
+                # بررسی نیاز به چرخش
+                if (metrics['consecutive_errors'] >= 3 or 
+                    metrics['health_score'] < 30):
+                    session['status'] = SessionStatus.ERROR.value
+                    await self.rotate_sessions(reason="health_check")
+                
+                await self._save_encrypted_metadata()
+                
+            except Exception as e:
+                logger.error(f"Failed to update metrics: {e}")
+    
+    def _calculate_health_score(self, metrics: Dict) -> float:
+        """محاسبه امتیاز سلامت session"""
+        score = 100.0
+        
+        # کاهش بر اساس خطاها
+        error_ratio = metrics.get('error_count', 0) / max(metrics.get('requests_count', 1), 1)
+        if error_ratio > 0.1:  # بیش از 10% خطا
+            score -= 40
+        
+        # کاهش بر اساس خطاهای متوالی
+        consecutive_errors = metrics.get('consecutive_errors', 0)
+        score -= consecutive_errors * 10
+        
+        # کاهش بر اساس زمان پاسخ
+        avg_response = metrics.get('average_response_time', 0)
+        if avg_response > 5.0:  # بیش از 5 ثانیه
+            score -= 20
+        
+        return max(0.0, min(100.0, score))
+    
+    async def validate_all_sessions(self) -> Dict[str, List]:
+        """اعتبارسنجی کامل تمام session‌ها"""
+        results = {
+            'valid': [],
+            'invalid': [],
+            'warning': [],
+            'needs_attention': []
+        }
+        
+        for session_id, session_info in self.metadata['sessions'].items():
+            try:
+                # بررسی وجود فایل
+                session_path = Path(session_info['path'])
                 if not session_path.exists():
-                    results.append((session_name, False, "File not found"))
+                    results['invalid'].append({
+                        'session_id': session_id,
+                        'reason': 'File not found'
+                    })
                     continue
                 
                 # بررسی سایز فایل
                 file_size = session_path.stat().st_size
-                if file_size < 100:  # بسیار کوچک
-                    results.append((session_name, False, "File too small (corrupted?)"))
-                    continue
+                if file_size < 100:
+                    results['warning'].append({
+                        'session_id': session_id,
+                        'reason': f'File too small ({file_size} bytes)'
+                    })
                 
-                # بررسی محتوای فایل (اگر رمزگذاری نشده)
-                if not self.config['encryption_enabled']:
-                    with open(session_path, 'rb') as f:
-                        content = f.read(100)
-                    
-                    if b'sqlite' not in content and b'SQLite' not in content:
-                        results.append((session_name, False, "Invalid session format"))
-                        continue
+                # بررسی سلامت متریک‌ها
+                health_score = session_info.get('metrics', {}).get('health_score', 100)
+                if health_score < 50:
+                    results['needs_attention'].append({
+                        'session_id': session_id,
+                        'reason': f'Low health score: {health_score}'
+                    })
                 
-                results.append((session_name, True, "Valid"))
+                # بررسی تاریخ انقضا
+                created_at = datetime.fromisoformat(session_info['created_at'])
+                age_days = (datetime.now() - created_at).days
+                if age_days > 30:
+                    results['warning'].append({
+                        'session_id': session_id,
+                        'reason': f'Old session ({age_days} days)'
+                    })
+                
+                results['valid'].append(session_id)
                 
             except Exception as e:
-                results.append((session_name, False, str(e)))
+                results['invalid'].append({
+                    'session_id': session_id,
+                    'reason': str(e)
+                })
         
         return results
+    
+    def _start_health_monitor(self):
+        """شروع مانیتورینگ سلامت سیستم"""
+        async def monitor_health():
+            while True:
+                try:
+                    await self._perform_health_check()
+                    await asyncio.sleep(60)  # هر 1 دقیقه
+                except Exception as e:
+                    logger.error(f"Health monitor error: {e}")
+                    await asyncio.sleep(10)
+        
+        # شروع task مانیتورینگ
+        self.health_check_task = asyncio.create_task(monitor_health())
+    
+    async def _perform_health_check(self):
+        """انجام بررسی سلامت سیستم"""
+        try:
+            # بررسی استفاده از حافظه
+            process = psutil.Process()
+            memory_usage = process.memory_percent()
+            
+            if memory_usage > 80:
+                logger.warning(f"High memory usage: {memory_usage:.1f}%")
+                
+                # پاکسازی کش
+                self._cleanup_cache()
+            
+            # بررسی فضای دیسک
+            disk_usage = psutil.disk_usage(self.base_dir).percent
+            if disk_usage > 90:
+                logger.warning(f"High disk usage: {disk_usage:.1f}%")
+                
+                # پاکسازی پشتیبان‌های قدیمی
+                await self._cleanup_old_data()
+            
+            # بررسی تعداد session‌ها
+            total_sessions = len(self.metadata['sessions'])
+            if total_sessions > 100:
+                logger.info(f"Total sessions: {total_sessions}")
+            
+            # بررسی session‌های مشکل‌دار
+            validation = await self.validate_all_sessions()
+            if validation['needs_attention']:
+                logger.warning(f"Sessions need attention: {len(validation['needs_attention'])}")
+            
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+    
+    def _cleanup_cache(self):
+        """پاکسازی کش"""
+        current_time = time.time()
+        to_remove = []
+        
+        for session_id, cache_info in self.session_cache.items():
+            if current_time - cache_info['timestamp'] > 300:  # 5 دقیقه
+                to_remove.append(session_id)
+        
+        for session_id in to_remove:
+            del self.session_cache[session_id]
+    
+    async def _cleanup_old_data(self):
+        """پاکسازی داده‌های قدیمی"""
+        try:
+            # پاکسازی session‌های قدیمی
+            for session_id, session_info in list(self.metadata['sessions'].items()):
+                created_at = datetime.fromisoformat(session_info['created_at'])
+                age_days = (datetime.now() - created_at).days
+                
+                if (age_days > 90 and 
+                    session_info['status'] != SessionStatus.ACTIVE.value):
+                    
+                    # حذف فایل session
+                    session_path = Path(session_info['path'])
+                    if session_path.exists():
+                        session_path.unlink()
+                    
+                    # حذف از متادیتا
+                    del self.metadata['sessions'][session_id]
+                    
+                    logger.info(f"Cleaned up old session: {session_id}")
+            
+            await self._save_encrypted_metadata()
+            
+        except Exception as e:
+            logger.error(f"Data cleanup failed: {e}")
+    
+    async def export_comprehensive_report(self, format_type: str = "json") -> Any:
+        """خروجی گزارش جامع"""
+        report = {
+            'report_id': str(uuid.uuid4()),
+            'generated_at': datetime.now().isoformat(),
+            'system_info': {
+                'version': '2.0.0',
+                'base_directory': str(self.base_dir),
+                'total_sessions': len(self.metadata['sessions']),
+                'active_sessions': len([
+                    s for s in self.metadata['sessions'].values()
+                    if s['status'] == SessionStatus.ACTIVE.value
+                ]),
+                'total_users': len(self.metadata['user_mapping']),
+                'uptime_seconds': (datetime.now() - self.metrics['start_time']).total_seconds()
+            },
+            'metrics': self.metrics.copy(),
+            'sessions_summary': [],
+            'health_status': 'healthy',
+            'recommendations': []
+        }
+        
+        # جمع‌آوری اطلاعات session‌ها
+        for session_id, session_info in self.metadata['sessions'].items():
+            session_summary = {
+                'session_id': session_id,
+                'status': session_info['status'],
+                'created_at': session_info['created_at'],
+                'last_used': session_info.get('last_used'),
+                'health_score': session_info.get('metrics', {}).get('health_score', 100),
+                'request_count': session_info.get('metrics', {}).get('requests_count', 0),
+                'error_count': session_info.get('metrics', {}).get('error_count', 0),
+                'device': session_info.get('device_info', {}).get('device_model', 'unknown'),
+                'user_id': session_info.get('user_id')
+            }
+            report['sessions_summary'].append(session_summary)
+        
+        # محاسبه وضعیت سلامت
+        avg_health = sum(
+            s.get('metrics', {}).get('health_score', 100) 
+            for s in self.metadata['sessions'].values()
+        ) / max(len(self.metadata['sessions']), 1)
+        
+        if avg_health < 50:
+            report['health_status'] = 'critical'
+        elif avg_health < 70:
+            report['health_status'] = 'warning'
+        
+        # تولید توصیه‌ها
+        if report['health_status'] == 'critical':
+            report['recommendations'].append(
+                "🔴 فوری: برخی session‌ها در وضعیت بحرانی هستند. چرخش session‌ها را انجام دهید."
+            )
+        
+        if len(self.metadata['sessions']) > 50:
+            report['recommendations'].append(
+                "⚠️ تعداد session‌ها زیاد است. پاکسازی session‌های قدیمی را در نظر بگیرید."
+            )
+        
+        # ذخیره گزارش در فایل
+        report_path = self.base_dir / "reports" / f"report_{report['report_id'][:8]}.json"
+        async with aiofiles.open(report_path, 'w', encoding='utf-8') as f:
+            await f.write(json.dumps(report, indent=2, ensure_ascii=False))
+        
+        if format_type == "json":
+            return report
+        elif format_type == "html":
+            return await self._generate_html_report(report)
+        else:
+            return json.dumps(report, indent=2)
+    
+    async def _generate_html_report(self, report: Dict) -> str:
+        """تولید گزارش HTML"""
+        html_template = """
+        <!DOCTYPE html>
+        <html dir="rtl">
+        <head>
+            <meta charset="UTF-8">
+            <title>گزارش سیستم مدیریت Session</title>
+            <style>
+                body { font-family: Tahoma, sans-serif; margin: 20px; }
+                .header { background: #2c3e50; color: white; padding: 20px; border-radius: 5px; }
+                .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+                .critical { background: #ffebee; border-color: #f44336; }
+                .warning { background: #fff3e0; border-color: #ff9800; }
+                .healthy { background: #e8f5e9; border-color: #4caf50; }
+                table { width: 100%; border-collapse: collapse; }
+                th, td { padding: 10px; text-align: right; border: 1px solid #ddd; }
+                th { background: #f5f5f5; }
+                .badge { padding: 3px 8px; border-radius: 10px; color: white; font-size: 12px; }
+                .badge-success { background: #4caf50; }
+                .badge-warning { background: #ff9800; }
+                .badge-danger { background: #f44336; }
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>📊 گزارش سیستم مدیریت Session</h1>
+                <p>تاریخ تولید: {generated_at}</p>
+            </div>
+            
+            <div class="section {health_class}">
+                <h2>وضعیت سیستم: {health_status}</h2>
+                <p>تعداد Session‌ها: {total_sessions} | کاربران: {total_users}</p>
+            </div>
+            
+            <div class="section">
+                <h2>📈 آمار کلی</h2>
+                <table>
+                    <tr>
+                        <th>Session‌های فعال</th>
+                        <th>چرخش‌های انجام شده</th>
+                        <th>عملیات موفق</th>
+                        <th>عملیات ناموفق</th>
+                    </tr>
+                    <tr>
+                        <td>{active_sessions}</td>
+                        <td>{rotations}</td>
+                        <td>{success_ops}</td>
+                        <td>{failed_ops}</td>
+                    </tr>
+                </table>
+            </div>
+            
+            <div class="section">
+                <h2>🎯 توصیه‌ها</h2>
+                <ul>
+                    {recommendations}
+                </ul>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # پر کردن template
+        health_class = ""
+        if report['health_status'] == 'critical':
+            health_class = 'critical'
+        elif report['health_status'] == 'warning':
+            health_class = 'warning'
+        else:
+            health_class = 'healthy'
+        
+        recommendations_html = ""
+        for rec in report['recommendations']:
+            recommendations_html += f"<li>{rec}</li>"
+        
+        html_content = html_template.format(
+            generated_at=report['generated_at'],
+            health_class=health_class,
+            health_status=report['health_status'],
+            total_sessions=report['system_info']['total_sessions'],
+            total_users=report['system_info']['total_users'],
+            active_sessions=report['system_info']['active_sessions'],
+            rotations=report['metrics'].get('session_rotations', 0),
+            success_ops=report['metrics'].get('successful_operations', 0),
+            failed_ops=report['metrics'].get('failed_operations', 0),
+            recommendations=recommendations_html
+        )
+        
+        return html_content
+    
+    @asynccontextmanager
+    async def session_context(self, session_id: str):
+        """
+        Context Manager برای مدیریت ایمن session
+        """
+        session_info = await self.get_session(session_id)
+        if not session_info:
+            raise ValueError(f"Session not found: {session_id}")
+        
+        try:
+            # ثبت شروع استفاده
+            session_info['last_activity'] = datetime.now().isoformat()
+            yield session_info
+            
+        except Exception as e:
+            # ثبت خطا
+            await self.update_session_metrics(
+                session_id, 
+                success=False, 
+                response_time=0.0
+            )
+            raise
+            
+        finally:
+            # ثبت پایان استفاده موفق
+            await self.update_session_metrics(
+                session_id, 
+                success=True, 
+                response_time=0.0  # می‌توانید زمان واقعی را محاسبه کنید
+            )
+    
+    async def close(self):
+        """بستن ایمن سیستم"""
+        try:
+            # توقف مانیتور سلامت
+            if self.health_check_task:
+                self.health_check_task.cancel()
+                try:
+                    await self.health_check_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # ذخیره نهایی متادیتا
+            await self._save_encrypted_metadata()
+            
+            # بستن thread pool
+            self.thread_pool.shutdown(wait=True)
+            
+            logger.info("Session manager closed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error during close: {e}")
 
-class SessionClientWrapper:
-    """
-    wrapper برای Telethon Client با مدیریت session پیشرفته
-    """
+# ============================================
+# Telethon Client Wrapper پیشرفته
+# ============================================
+
+class AdvancedTelethonWrapper:
+    """Wrapper پیشرفته برای Telethon با قابلیت‌های اضافه"""
     
     def __init__(self, session_manager: AdvancedSessionManager):
         self.session_manager = session_manager
-        self.client = None
-        self.current_session = None
+        self.clients = {}  # session_id -> client
+        self.connection_pool = {}
+        self.reconnect_attempts = {}
         
-    async def get_client(self):
-        """دریافت کلاینت فعال"""
-        if self.client and self.client.is_connected():
-            return self.client
+    async def get_client(self, session_id: str, auto_reconnect: bool = True):
+        """دریافت کلاینت Telethon"""
+        if session_id in self.clients:
+            client = self.clients[session_id]
+            if client.is_connected():
+                return client
+            elif auto_reconnect:
+                await self.reconnect_client(session_id)
+                return self.clients.get(session_id)
         
-        await self._reconnect()
-        return self.client
+        # ایجاد کلاینت جدید
+        client = await self.create_client(session_id)
+        if client:
+            self.clients[session_id] = client
+            return client
+        
+        return None
     
-    async def _reconnect(self):
-        """اتصال مجدد با session فعال"""
+    async def create_client(self, session_id: str):
+        """ایجاد کلاینت Telethon جدید"""
         try:
-            if self.client:
-                await self.client.disconnect()
-            
-            session_info = await self.session_manager.get_active_session_info()
+            session_info = await self.session_manager.get_session(session_id)
             if not session_info:
-                raise Exception("No active session available")
+                logger.error(f"Session not found: {session_id}")
+                return None
             
             from telethon import TelegramClient
+            from telethon.network import ConnectionTcpFull
             
-            self.current_session = session_info['name']
-            
-            self.client = TelegramClient(
+            # تنظیمات اتصال پیشرفته
+            client = TelegramClient(
                 session=session_info['path'],
                 api_id=session_info['api_id'],
                 api_hash=session_info['api_hash'],
@@ -602,707 +1297,328 @@ class SessionClientWrapper:
                 system_version=session_info['device_info']['system_version'],
                 app_version=session_info['device_info']['app_version'],
                 lang_code=session_info['device_info']['lang_code'],
-                system_lang_code=session_info['device_info']['system_lang_code']
+                system_lang_code=session_info['device_info']['system_lang_code'],
+                connection=ConnectionTcpFull,
+                use_ipv6=False,
+                proxy=None,  # می‌توانید proxy اضافه کنید
+                timeout=30,
+                request_retries=3,
+                connection_retries=3,
+                auto_reconnect=True
             )
             
-            await self.client.start()
+            # اتصال
+            await client.connect()
             
-            # به‌روزرسانی آمار
-            await self.session_manager.update_session_stats(
-                self.current_session, 
-                success=True
-            )
+            # بررسی اتصال
+            if not await client.is_user_authorized():
+                logger.warning(f"Session {session_id} is not authorized")
+                return None
             
-            logger.info(f"Connected with session: {self.current_session}")
+            logger.info(f"Telethon client created for session: {session_id}")
+            return client
             
         except Exception as e:
-            logger.error(f"Connection failed: {e}")
-            
-            # ثبت خطا
-            if self.current_session:
-                await self.session_manager.update_session_stats(
-                    self.current_session,
-                    success=False,
-                    error_msg=str(e)
-                )
-                
-                # چرخش session در صورت خطا
-                if "FloodWaitError" in str(e) or "AuthKeyError" in str(e):
-                    await self.session_manager.rotate_sessions(force=True)
-            
-            raise
+            logger.error(f"Failed to create client: {e}")
+            await self.session_manager.update_session_metrics(
+                session_id, 
+                success=False
+            )
+            return None
     
-    async def execute_with_retry(self, coroutine_func, max_retries: int = 3):
+    async def reconnect_client(self, session_id: str, max_attempts: int = 3):
+        """اتصال مجدد کلاینت"""
+        if session_id not in self.reconnect_attempts:
+            self.reconnect_attempts[session_id] = 0
+        
+        attempts = self.reconnect_attempts[session_id]
+        if attempts >= max_attempts:
+            logger.error(f"Max reconnect attempts reached for {session_id}")
+            return False
+        
+        try:
+            # حذف کلاینت قدیمی
+            if session_id in self.clients:
+                try:
+                    await self.clients[session_id].disconnect()
+                except:
+                    pass
+                del self.clients[session_id]
+            
+            # ایجاد کلاینت جدید
+            client = await self.create_client(session_id)
+            if client:
+                self.clients[session_id] = client
+                self.reconnect_attempts[session_id] = 0
+                return True
+            else:
+                self.reconnect_attempts[session_id] += 1
+                return False
+                
+        except Exception as e:
+            logger.error(f"Reconnect failed: {e}")
+            self.reconnect_attempts[session_id] += 1
+            return False
+    
+    async def execute_with_retry(self, session_id: str, coroutine_func: Callable, 
+                               max_retries: int = 3, use_rotation: bool = True):
         """
-        اجرای یک عمل با قابلیت تلاش مجدد و چرخش session
+        اجرای عملیات با قابلیت تلاش مجدد و چرخش خودکار
         """
+        last_error = None
+        
         for attempt in range(max_retries):
             try:
-                client = await self.get_client()
-                result = await coroutine_func(client)
+                client = await self.get_client(session_id)
+                if not client:
+                    raise ConnectionError("Client not available")
                 
-                # موفقیت
-                if self.current_session:
-                    await self.session_manager.update_session_stats(
-                        self.current_session,
-                        success=True
-                    )
+                # اجرای عملیات
+                start_time = time.time()
+                result = await coroutine_func(client)
+                response_time = time.time() - start_time
+                
+                # ثبت موفقیت
+                await self.session_manager.update_session_metrics(
+                    session_id,
+                    success=True,
+                    response_time=response_time
+                )
                 
                 return result
                 
             except Exception as e:
+                last_error = e
                 logger.error(f"Attempt {attempt + 1} failed: {e}")
                 
                 # ثبت خطا
-                if self.current_session:
-                    await self.session_manager.update_session_stats(
-                        self.current_session,
-                        success=False,
-                        error_msg=str(e)
-                    )
+                await self.session_manager.update_session_metrics(
+                    session_id,
+                    success=False
+                )
                 
-                # تصمیم‌گیری برای چرخش session
+                # تصمیم‌گیری برای اقدام بعدی
                 should_rotate = any([
                     "FloodWaitError" in str(e),
                     "AuthKeyError" in str(e),
                     "SessionRevokedError" in str(e),
-                    attempt >= 1  # بعد از اولین تلاش ناموفق
+                    attempt >= 1 and use_rotation
                 ])
                 
                 if should_rotate and attempt < max_retries - 1:
                     logger.info("Rotating session and retrying...")
-                    await self.session_manager.rotate_sessions(force=True)
-                    self.client = None  # force reconnect
-                    await asyncio.sleep(2 ** attempt)  # exponential backoff
+                    
+                    # چرخش session
+                    new_session_id = await self.session_manager.rotate_sessions(
+                        force=True,
+                        reason=f"retry_after_error:{type(e).__name__}"
+                    )
+                    
+                    if new_session_id and new_session_id != session_id:
+                        session_id = new_session_id
+                    
+                    # تاخیر تصاعدی
+                    await asyncio.sleep(2 ** attempt)
                     continue
                 else:
-                    raise
+                    # تاخیر قبل از تلاش مجدد
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(1)
+        
+        raise last_error or Exception("All retry attempts failed")
     
-    async def close(self):
-        """بستن ایمن"""
-        if self.client and self.client.is_connected():
-            await self.client.disconnect()
-            logger.info("Client disconnected")
+    async def close_all(self):
+        """بستن تمامی کلاینت‌ها"""
+        for session_id, client in list(self.clients.items()):
+            try:
+                if client.is_connected():
+                    await client.disconnect()
+                del self.clients[session_id]
+            except Exception as e:
+                logger.error(f"Error closing client {session_id}: {e}")
+        
+        logger.info("All Telethon clients closed")
 
-# تابع کمکی برای استفاده آسان
-async def create_session_manager() -> AdvancedSessionManager:
-    """ایجاد instance از Session Manager"""
-    manager = AdvancedSessionManager()
+# ============================================
+# سیستم Rate Limiting پیشرفته
+# ============================================
+
+class RateLimiter:
+    """سیستم محدودیت نرخ درخواست"""
     
-    # اجرای پاکسازی دوره‌ای
-    await manager.cleanup_old_sessions()
+    def __init__(self, requests_per_minute: int = 60, burst_size: int = 10):
+        self.requests_per_minute = requests_per_minute
+        self.burst_size = burst_size
+        self.request_logs = {}  # session_id -> [timestamps]
+        self.lock = asyncio.Lock()
     
-    # اعتبارسنجی session‌ها
-    validation_results = await manager.validate_sessions()
-    invalid_sessions = [r for r in validation_results if not r[1]]
+    async def check_rate_limit(self, session_id: str) -> Tuple[bool, float]:
+        """بررسی محدودیت نرخ"""
+        async with self.lock:
+            now = time.time()
+            
+            if session_id not in self.request_logs:
+                self.request_logs[session_id] = []
+            
+            # حذف درخواست‌های قدیمی (بیش از 1 دقیقه)
+            cutoff_time = now - 60
+            self.request_logs[session_id] = [
+                t for t in self.request_logs[session_id] 
+                if t > cutoff_time
+            ]
+            
+            # بررسی burst
+            if len(self.request_logs[session_id]) >= self.burst_size:
+                # محاسبه زمان انتظار
+                wait_time = 60 / self.requests_per_minute
+                return False, wait_time
+            
+            # بررسی نرخ در دقیقه
+            if len(self.request_logs[session_id]) >= self.requests_per_minute:
+                oldest_request = min(self.request_logs[session_id])
+                wait_time = 60 - (now - oldest_request)
+                return False, max(wait_time, 0)
+            
+            # ثبت درخواست جدید
+            self.request_logs[session_id].append(now)
+            return True, 0
     
-    if invalid_sessions:
-        logger.warning(f"Found {len(invalid_sessions)} invalid sessions")
-        for session_name, is_valid, reason in invalid_sessions:
-            logger.warning(f"  - {session_name}: {reason}")
+    def get_session_stats(self, session_id: str) -> Dict:
+        """دریافت آمار Rate Limiting"""
+        if session_id not in self.request_logs:
+            return {
+                'requests_last_minute': 0,
+                'is_limited': False,
+                'burst_available': self.burst_size
+            }
+        
+        now = time.time()
+        cutoff_time = now - 60
+        recent_requests = [
+            t for t in self.request_logs[session_id] 
+            if t > cutoff_time
+        ]
+        
+        return {
+            'requests_last_minute': len(recent_requests),
+            'is_limited': len(recent_requests) >= self.requests_per_minute,
+            'burst_available': max(0, self.burst_size - len(recent_requests))
+        }
+
+# ============================================
+# تابع اصلی و تست
+# ============================================
+
+async def create_advanced_session_manager(config: Optional[SessionConfig] = None) -> AdvancedSessionManager:
+    """ایجاد instance از Session Manager پیشرفته"""
+    manager = AdvancedSessionManager(config=config)
+    
+    # اعتبارسنجی اولیه
+    validation = await manager.validate_all_sessions()
+    if validation['invalid']:
+        logger.warning(f"Found {len(validation['invalid'])} invalid sessions")
+    
+    # پاکسازی دوره‌ای
+    await manager._cleanup_old_data()
+    
+    # تولید گزارش اولیه
+    report = await manager.export_comprehensive_report()
+    logger.info(f"System initialized. Health status: {report['health_status']}")
     
     return manager
 
-class CompleteSecureSystem:
-    """سیستم کامل با همه حفاظت‌ها"""
+async def example_usage():
+    """مثال استفاده از سیستم"""
     
-    def __init__(self, token: str, api_id: int, api_hash: str):
-        self.bot = telebot.TeleBot(token)
-        
-        # ماژول‌های امنیتی
-        self.auth = UserAuthentication()
-        self.session_mgr = IsolatedSessionManager()
-        self.access_ctl = OwnershipBasedAccess()
-        self.logout_sys = SafeLogoutSystem()
-        self.activity_monitor = UserActivityMonitor()
-        
-        # تنظیمات
-        self.settings = {
-            'max_accounts_per_user': 2,
-            'session_timeout_hours': 24,
-            'require_phone_verification': True,
-            'enable_auto_logout': True,
-            'log_all_activities': True,
-            'notify_on_new_login': True,
-            'enable_two_step_verification': False
-        }
-        
-        self.setup_handlers()
+    # 1. ایجاد مدیر session
+    config = SessionConfig(
+        max_sessions=3,
+        session_lifetime_hours=24,
+        auto_rotate=True,
+        backup_count=5
+    )
     
-    def setup_handlers(self):
-        @self.bot.message_handler(commands=['login'])
-        def login_handler(message):
-            user_id = message.from_user.id
-            
-            # 1. بررسی مجوز کاربر
-            auth_result = self.auth.is_user_allowed(user_id)
-            if not auth_result['allowed']:
-                self.bot.send_message(user_id, "❌ دسترسی denied")
-                return
-            
-            # 2. بررسی محدودیت تعداد اکانت
-            user_accounts = self._count_user_accounts(user_id)
-            if user_accounts >= self.settings['max_accounts_per_user']:
-                self.bot.send_message(
-                    user_id,
-                    f"❌ شما حداکثر {self.settings['max_accounts_per_user']} اکانت می‌توانید اضافه کنید."
-                )
-                return
-            
-            # 3. درخواست شماره تلفن
-            msg = self.bot.send_message(
-                user_id,
-                "📱 لطفاً شماره تلفن تلگرام خود را ارسال کنید:\n\n"
-                "⚠️ توجه: این شماره فقط برای یکبار ورود استفاده می‌شود."
-            )
-            self.bot.register_next_step_handler(msg, process_login)
-        
-        def process_login(message):
-            user_id = message.from_user.id
-            phone = message.text
-            
-            # 1. اعتبارسنجی شماره
-            if not self._validate_phone_number(phone):
-                self.bot.send_message(user_id, "❌ شماره تلفن نامعتبر است")
-                return
-            
-            # 2. ایجاد session مخصوص کاربر
-            session_name = f"user_{user_id}_{int(time.time())}"
-            session_path = self.session_mgr.create_user_session(user_id, session_name)
-            
-            # 3. ثبت مالکیت
-            self.access_ctl.register_session_owner(session_name, user_id)
-            
-            # 4. شروع فرآیند login (در thread جدا)
-            Thread(target=self._perform_login_async, 
-                  args=(user_id, phone, session_name, session_path)).start()
-            
-            self.bot.send_message(
-                user_id,
-                "⏳ در حال اتصال...\n"
-                "لطفاً کد تأیید را در تلگرام خود وارد کنید."
-            )
-        
-        @self.bot.message_handler(commands=['myaccounts'])
-        def list_accounts_handler(message):
-            user_id = message.from_user.id
-            
-            # فقط مالک می‌تواند session‌های خود را ببیند
-            sessions = self.session_mgr.list_user_sessions(user_id)
-            
-            if not sessions:
-                self.bot.send_message(user_id, "📭 هیچ اکانتی ندارید.")
-                return
-            
-            keyboard = types.InlineKeyboardMarkup()
-            for session_path in sessions:
-                session_name = session_path.stem
-                btn_text = f"👤 {session_name}"
-                
-                keyboard.add(types.InlineKeyboardButton(
-                    btn_text,
-                    callback_data=f"view_session_{session_name}"
-                ))
-            
-            self.bot.send_message(
-                user_id,
-                f"📋 اکانت‌های شما ({len(sessions)}):",
-                reply_markup=keyboard
-            )
-        
-        @self.bot.callback_query_handler(func=lambda call: call.data.startswith('logout_'))
-        def logout_callback_handler(call):
-            user_id = call.from_user.id
-            session_name = call.data.replace('logout_', '')
-            
-            # بررسی مالکیت
-            if not self.access_ctl.can_access_session(user_id, session_name):
-                self.bot.answer_callback_query(call.id, "❌ دسترسی denied")
-                return
-            
-            # درخواست logout با تأیید
-            result = self.logout_sys.request_logout(user_id, session_name)
-            
-            if result['success']:
-                if result.get('needs_confirmation'):
-                    self.bot.answer_callback_query(
-                        call.id, 
-                        "لطفاً در پیام بعدی تأیید کنید"
-                    )
-                else:
-                    self.bot.answer_callback_query(call.id, "✅ logout شد")
-            else:
-                self.bot.answer_callback_query(call.id, f"❌ {result.get('error')}")
-        
-        @self.bot.message_handler(func=lambda m: m.text.startswith('/confirm_logout_'))
-        def confirm_logout_handler(message):
-            user_id = message.from_user.id
-            request_id = message.text.replace('/confirm_logout_', '')
-            
-            # پیدا کردن درخواست
-            if request_id in self.logout_sys.logout_requests:
-                req = self.logout_sys.logout_requests[request_id]
-                
-                if req['user_id'] == user_id and req['status'] == 'pending':
-                    # اجرای logout
-                    result = self.logout_sys._execute_logout(
-                        user_id, 
-                        req['session_name']
-                    )
-                    
-                    if result['success']:
-                        self.bot.send_message(user_id, "✅ با موفقیت logout شدید.")
-                    else:
-                        self.bot.send_message(user_id, f"❌ {result.get('error')}")
-                    
-                    # به‌روزرسانی وضعیت درخواست
-                    req['status'] = 'completed'
-                else:
-                    self.bot.send_message(user_id, "❌ درخواست نامعتبر است.")
-            else:
-                self.bot.send_message(user_id, "❌ درخواست یافت نشد.")
-
-class SafeLogoutSystem:
-    """سیستم logout ایمن با تأیید کاربر"""
+    manager = await create_advanced_session_manager(config)
     
-    def __init__(self):
-        self.active_sessions = {}  # user_id -> {sessions: [], last_activity: timestamp}
-        self.logout_requests = {}  # session_name -> {requested_by: user_id, timestamp}
-        self.logout_settings = {
-            'auto_logout_after_hours': 24,
-            'inactivity_timeout_minutes': 60,
-            'require_confirmation': True,
-            'send_warning_before_logout': True,
-            'warning_minutes_before': 5
-        }
-    
-    async def check_auto_logout(self, user_id: int, session_name: str) -> bool:
-        """بررسی نیاز به auto-logout"""
-        if user_id not in self.active_sessions:
-            return False
-        
-        session_info = self.active_sessions[user_id].get(session_name)
-        if not session_info:
-            return False
-        
-        last_activity = session_info['last_activity']
-        now = time.time()
-        
-        # 1. بررسی عدم فعالیت
-        inactive_minutes = (now - last_activity) / 60
-        if inactive_minutes > self.logout_settings['inactivity_timeout_minutes']:
-            logger.info(f"Session {session_name} inactive for {inactive_minutes:.1f} minutes")
-            
-            if self.logout_settings['send_warning_before_logout']:
-                await self._send_inactivity_warning(user_id, session_name)
-            
-            return True
-        
-        # 2. بررسی مدت زمان کلی session
-        session_age_hours = (now - session_info['created_at']) / 3600
-        if session_age_hours > self.logout_settings['auto_logout_after_hours']:
-            logger.info(f"Session {session_name} expired after {session_age_hours:.1f} hours")
-            
-            if self.logout_settings['send_warning_before_logout']:
-                await self._send_expiry_warning(user_id, session_name)
-            
-            return True
-        
-        return False
-    
-    async def _send_inactivity_warning(self, user_id: int, session_name: str):
-        """ارسال هشدار عدم فعالیت"""
-        warning_msg = (
-            f"⚠️ اخطار: session '{session_name}' به دلیل عدم فعالیت در حال انقضا است.\n\n"
-            f"در صورت عدم فعالیت در {self.logout_settings['warning_minutes_before']} دقیقه آینده، "
-            f"به صورت خودکار logout خواهد شد."
+    try:
+        # 2. ایجاد session جدید
+        session_info = await manager.create_session(
+            api_id=123456,
+            api_hash="your_api_hash_here",
+            phone="+1234567890",
+            user_id=12345
         )
         
-        # ارسال به کاربر (مثلاً از طریق ربات)
-        await self._send_message_to_user(user_id, warning_msg)
-    
-    async def request_logout(self, user_id: int, session_name: str, 
-                           force: bool = False) -> dict:
-        """درخواست logout"""
+        session_id = session_info['session_id']
+        print(f"✅ Session created: {session_id}")
         
-        # 1. بررسی مالکیت
-        if not await self._validate_ownership(user_id, session_name):
-            return {
-                'success': False,
-                'error': 'شما مالک این session نیستید'
-            }
-        
-        # 2. اگر force نباشد، درخواست تأیید
-        if not force and self.logout_settings['require_confirmation']:
-            request_id = f"logout_req_{int(time.time())}"
+        # 3. استفاده از context manager
+        async with manager.session_context(session_id) as session:
+            print(f"📱 Using session: {session['device_info']['device_model']}")
             
-            self.logout_requests[request_id] = {
-                'user_id': user_id,
-                'session_name': session_name,
-                'request_time': time.time(),
-                'status': 'pending'
-            }
+            # 4. ایجاد wrapper برای Telethon
+            wrapper = AdvancedTelethonWrapper(manager)
             
-            # ارسال درخواست تأیید
-            confirmation_msg = (
-                f"🔐 درخواست logout از session '{session_name}'\n\n"
-                f"آیا مطمئن هستید؟\n"
-                f"✅ تأیید: /confirm_logout_{request_id}\n"
-                f"❌ انصراف: /cancel_logout_{request_id}"
-            )
-            
-            await self._send_message_to_user(user_id, confirmation_msg)
-            
-            return {
-                'success': True,
-                'needs_confirmation': True,
-                'request_id': request_id
-            }
-        
-        # 3. اجرای logout
-        return await self._execute_logout(user_id, session_name)
-    
-    async def _execute_logout(self, user_id: int, session_name: str) -> dict:
-        """اجرای logout"""
-        try:
-            # 1. قطع اتصال
-            if session_name in self.active_sessions.get(user_id, {}):
-                session_info = self.active_sessions[user_id][session_name]
+            # 5. اجرای عملیات با retry
+            try:
+                result = await wrapper.execute_with_retry(
+                    session_id,
+                    lambda client: client.get_me(),
+                    max_retries=3
+                )
+                print(f"👤 User: {result.username}")
                 
-                if session_info.get('client'):
-                    await session_info['client'].disconnect()
-            
-            # 2. حذف از active sessions
-            if user_id in self.active_sessions:
-                if session_name in self.active_sessions[user_id]:
-                    del self.active_sessions[user_id][session_name]
-            
-            # 3. حذف فایل session (اختیاری)
-            if self.logout_settings.get('delete_session_file', False):
-                session_path = Path(f"sessions/{session_name}.session")
-                if session_path.exists():
-                    session_path.unlink()
-            
-            # 4. ثبت در لاگ
-            logger.info(f"User {user_id} logged out from {session_name}")
-            
-            return {
-                'success': True,
-                'message': 'با موفقیت logout شدید'
-            }
-            
-        except Exception as e:
-            logger.error(f"Logout failed: {e}")
-            return {
-                'success': False,
-                'error': f'خطا در logout: {str(e)}'
-            }
+            except Exception as e:
+                print(f"❌ Operation failed: {e}")
+        
+        # 6. دریافت گزارش
+        report = await manager.export_comprehensive_report("html")
+        
+        if isinstance(report, dict):
+            print(f"📊 System health: {report['health_status']}")
+            print(f"📈 Total sessions: {report['system_info']['total_sessions']}")
+        
+        # 7. اعتبارسنجی
+        validation = await manager.validate_all_sessions()
+        print(f"🔍 Valid sessions: {len(validation['valid'])}")
+        
+    finally:
+        # 8. بستن ایمن
+        await manager.close()
+        print("🔒 System closed safely")
 
-class OwnershipBasedAccess:
-    """دسترسی مبتنی بر مالکیت"""
+async def stress_test():
+    """تست استرس سیستم"""
+    manager = await create_advanced_session_manager()
     
-    def __init__(self):
-        self.ownership_db = {}  # session_name -> owner_user_id
-        self.shared_sessions = {}  # session_name -> [user_ids]
-    
-    def register_session_owner(self, session_name: str, owner_user_id: int):
-        """ثبت مالک session"""
-        self.ownership_db[session_name] = owner_user_id
-        
-        # ذخیره در فایل
-        self._save_ownership_db()
-    
-    def can_access_session(self, user_id: int, session_name: str) -> bool:
-        """بررسی دسترسی کاربر به session"""
-        # 1. بررسی مالک اصلی
-        if session_name in self.ownership_db:
-            if self.ownership_db[session_name] == user_id:
-                return True
-        
-        # 2. بررسی دسترسی اشتراکی
-        if session_name in self.shared_sessions:
-            if user_id in self.shared_sessions[session_name]:
-                return True
-        
-        # 3. بررسی ادمین بودن
-        if self._is_admin(user_id):
-            return True
-        
-        return False
-    
-    def share_session(self, session_name: str, owner_user_id: int, target_user_id: int):
-        """اشتراک‌گذاری session"""
-        if session_name not in self.ownership_db:
-            return False
-        
-        if self.ownership_db[session_name] != owner_user_id:
-            return False  # فقط مالک می‌تواند اشتراک بگذارد
-        
-        if session_name not in self.shared_sessions:
-            self.shared_sessions[session_name] = []
-        
-        if target_user_id not in self.shared_sessions[session_name]:
-            self.shared_sessions[session_name].append(target_user_id)
-            self._save_shared_sessions()
-            return True
-        
-        return False
-
-class IsolatedSessionManager:
-    """مدیریت session با جداسازی کامل"""
-    
-    def __init__(self, base_dir: Path = Path("sessions")):
-        self.base_dir = base_dir
-        
-        # ساختار ایمن:
-        # sessions/
-        # ├── user_123456789/          # پوشه کاربر
-        # │   ├── data/               # داده‌های کاربر
-        # │   ├── session_abc.session # session‌ها
-        # │   └── session_def.session
-        # ├── user_987654321/
-        # │   └── ...
-        # └── user_{user_id}/
-        #     └── ...
-    
-    def get_user_session_dir(self, user_id: int) -> Path:
-        """دریافت پوشه مخصوص کاربر"""
-        user_dir = self.base_dir / f"user_{user_id}"
-        user_dir.mkdir(exist_ok=True, parents=True)
-        
-        # تنظیم مجوزهای امن
-        user_dir.chmod(0o700)  # فقط مالک دسترسی دارد
-        
-        return user_dir
-    
-    def create_user_session(self, user_id: int, session_name: str) -> Path:
-        """ایجاد session برای کاربر خاص"""
-        user_dir = self.get_user_session_dir(user_id)
-        session_dir = user_dir / "sessions"
-        session_dir.mkdir(exist_ok=True)
-        
-        session_path = session_dir / f"{session_name}.session"
-        return session_path
-    
-    def list_user_sessions(self, user_id: int) -> List[Path]:
-        """لیست session‌های یک کاربر"""
-        user_dir = self.base_dir / f"user_{user_id}"
-        if not user_dir.exists():
-            return []
-        
-        session_dir = user_dir / "sessions"
-        if not session_dir.exists():
-            return []
-        
-        return list(session_dir.glob("*.session"))
-    
-    def delete_user_session(self, user_id: int, session_name: str) -> bool:
-        """حذف session کاربر"""
-        session_path = self.base_dir / f"user_{user_id}" / "sessions" / f"{session_name}.session"
-        
-        if session_path.exists():
-            session_path.unlink()
-            return True
-        return False
-    
-    def validate_user_access(self, user_id: int, session_path: Path) -> bool:
-        """بررسی دسترسی کاربر به session"""
-        try:
-            # بررسی مالکیت فایل
-            if not session_path.exists():
-                return False
-            
-            # بررسی اینکه session در پوشه کاربر باشد
-            user_dir = self.base_dir / f"user_{user_id}"
-            return user_dir in session_path.parents
-            
-        except:
-            return False
-
-class UserAuthentication:
-    """سیستم احراز هویت و محدودیت کاربران"""
-    
-    def __init__(self):
-        self.allowed_users_file = Path("data/allowed_users.json")
-        self.pending_requests_file = Path("data/pending_requests.json")
-        self.user_limits_file = Path("data/user_limits.json")
-        
-        self.allowed_users = self._load_allowed_users()
-        self.pending_requests = self._load_pending_requests()
-        self.user_limits = self._load_user_limits()
-    
-    def _load_allowed_users(self):
-        """بارگذاری کاربران مجاز"""
-        if self.allowed_users_file.exists():
-            with open(self.allowed_users_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {
-            'admins': [123456789],  # آیدی عددی ادمین‌ها
-            'verified_users': [],   # کاربران تأیید شده
-            'banned_users': []      # کاربران مسدود شده
-        }
-    
-    def is_user_allowed(self, user_id: int, username: str = None) -> dict:
-        """بررسی مجوز کاربر"""
-        
-        # 1. بررسی مسدود بودن
-        if user_id in self.allowed_users['banned_users']:
-            return {'allowed': False, 'reason': 'اکانت شما مسدود شده است'}
-        
-        # 2. بررسی ادمین بودن
-        if user_id in self.allowed_users['admins']:
-            return {'allowed': True, 'role': 'admin', 'max_accounts': 5}
-        
-        # 3. بررسی کاربر تأیید شده
-        if user_id in self.allowed_users['verified_users']:
-            return {'allowed': True, 'role': 'verified', 'max_accounts': 2}
-        
-        # 4. کاربر جدید - نیاز به تأیید
-        return {'allowed': False, 'reason': 'نیاز به تأیید ادمین', 'needs_approval': True}
-    
-    def request_access(self, user_id: int, username: str, phone: str = None):
-        """درخواست دسترسی جدید"""
-        request_id = f"req_{int(time.time())}_{user_id}"
-        
-        request_data = {
-            'request_id': request_id,
-            'user_id': user_id,
-            'username': username,
-            'phone_hash': hashlib.sha256(phone.encode()).hexdigest()[:16] if phone else None,
-            'request_time': datetime.now().isoformat(),
-            'status': 'pending',
-            'reviewed_by': None,
-            'review_time': None
-        }
-        
-        self.pending_requests[request_id] = request_data
-        self._save_pending_requests()
-        
-        # اطلاع به ادمین
-        self._notify_admins_new_request(request_data)
-        
-        return request_id
-    
-    def approve_user(self, request_id: str, admin_id: int):
-        """تأیید کاربر"""
-        if request_id in self.pending_requests:
-            self.pending_requests[request_id]['status'] = 'approved'
-            self.pending_requests[request_id]['reviewed_by'] = admin_id
-            self.pending_requests[request_id]['review_time'] = datetime.now().isoformat()
-            
-            user_id = self.pending_requests[request_id]['user_id']
-            self.allowed_users['verified_users'].append(user_id)
-            
-            self._save_pending_requests()
-            self._save_allowed_users()
-            
-            return True
-        return False
-    
-    def reject_user(self, request_id: str, admin_id: int, reason: str):
-        """رد درخواست کاربر"""
-        if request_id in self.pending_requests:
-            self.pending_requests[request_id]['status'] = 'rejected'
-            self.pending_requests[request_id]['reviewed_by'] = admin_id
-            self.pending_requests[request_id]['review_time'] = datetime.now().isoformat()
-            self.pending_requests[request_id]['rejection_reason'] = reason
-            
-            self._save_pending_requests()
-            return True
-        return False
-
-class SecureLoginBot:
-    """ربات با سیستم احراز هویت"""
-    
-    def __init__(self, token: str, api_id: int, api_hash: str):
-        self.bot = telebot.TeleBot(token)
-        self.auth = UserAuthentication()
-        self.user_sessions = {}  # user_id -> {session_name: info}
-        self.user_account_limits = {}  # user_id -> account_count
-        
-        self.setup_handlers()
-    
-    def setup_handlers(self):
-        @self.bot.message_handler(commands=['start'])
-        def start_handler(message):
-            user_id = message.from_user.id
-            username = message.from_user.username
-            
-            # بررسی مجوز
-            auth_result = self.auth.is_user_allowed(user_id, username)
-            
-            if not auth_result['allowed']:
-                if auth_result.get('needs_approval'):
-                    # درخواست دسترسی
-                    msg = self.bot.send_message(
-                        user_id,
-                        "👋 برای استفاده از ربات نیاز به تأیید دارید.\n\n"
-                        "لطفاً شماره تلفن خود را ارسال کنید:"
-                    )
-                    self.bot.register_next_step_handler(msg, process_access_request)
-                else:
-                    self.bot.send_message(user_id, f"❌ {auth_result['reason']}")
-                return
-            
-            # کاربر مجاز است
-            keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            
-            if auth_result['role'] == 'admin':
-                keyboard.row('🔐 ورود به اکانت', '👨‍💼 پنل ادمین')
-                keyboard.row('📋 اکانت‌های من', '🚪 خروج')
-            else:
-                keyboard.row('🔐 ورود به اکانت', '📋 اکانت‌های من')
-                keyboard.row('🚪 خروج', 'ℹ️ راهنما')
-            
-            self.bot.send_message(
-                user_id,
-                f"✅ شما دسترسی دارید.\n\n"
-                f"🔄 می‌توانید حداکثر {auth_result.get('max_accounts', 1)} اکانت اضافه کنید.",
-                reply_markup=keyboard
+    tasks = []
+    for i in range(10):
+        task = asyncio.create_task(
+            manager.create_session(
+                api_id=1000000 + i,
+                api_hash=f"hash_{i}",
+                user_id=i
             )
-        
-        def process_access_request(message):
-            user_id = message.from_user.id
-            phone = message.text
-            
-            # ثبت درخواست
-            request_id = self.auth.request_access(
-                user_id=user_id,
-                username=message.from_user.username,
-                phone=phone
-            )
-            
-            self.bot.send_message(
-                user_id,
-                "✅ درخواست شما ثبت شد.\n\n"
-                "در صورت تأیید ادمین به شما اطلاع داده می‌شود.\n"
-                "لطفاً صبور باشید."
-            )
-
-
+        )
+        tasks.append(task)
+    
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    successful = [r for r in results if not isinstance(r, Exception)]
+    print(f"✅ Created {len(successful)} sessions")
+    
+    await manager.close()
 
 if __name__ == "__main__":
-    # تست سیستم
-    async def test():
-        manager = await create_session_manager()
-        
-        # ایجاد session تست
-        session = await manager.create_new_session(
-            api_id=123456,
-            api_hash="test_hash",
-            phone="+1234567890"
-        )
-        
-        print(f"Created session: {session['name']}")
-        
-        # دریافت گزارش
-        report = await manager.export_session_report()
-        print(f"Total sessions: {report['total_sessions']}")
-        
-        # چرخش session
-        await manager.rotate_sessions()
-        
-        # پاکسازی
-        await manager.cleanup_old_sessions()
+    # اجرای مثال
+    print("🚀 Starting Advanced Session Manager...")
     
-    asyncio.run(test())
+    # انتخاب تست
+    test_mode = "example"  # "example" یا "stress"
+    
+    if test_mode == "example":
+        asyncio.run(example_usage())
+    elif test_mode == "stress":
+        asyncio.run(stress_test())
+    
+    print("✨ Test completed!")
