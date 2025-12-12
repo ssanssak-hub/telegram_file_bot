@@ -1,3 +1,4 @@
+#session_config.json
 {
   "max_sessions": 5,
   "session_lifetime_hours": 168,
