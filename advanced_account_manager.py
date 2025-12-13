@@ -36,6 +36,7 @@ import zlib
 
 # ========== کتابخانه‌های ضروری ==========
 try:
+    
     from cryptography.fernet import Fernet
     from cryptography.hazmat.primitives import hashes, hmac
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -69,6 +70,13 @@ try:
 except ImportError:
     HAS_AIOHTTP = False
     print("⚠️ برای API سرور: pip install aiohttp")
+    
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+    print("⚠️ برای مانیتورینگ: pip install psutil")
 
 # ========== تنظیمات لاگ پیشرفته ==========
 
