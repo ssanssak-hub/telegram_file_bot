@@ -769,6 +769,7 @@ class AdvancedAccountManager:
     
     async def login_with_qr_code(self) -> Tuple[bool, Optional[TelegramClient], Optional[str]]:
         """ورود با QR Code"""
+        return await self.login_with_qr()  # یا مستقیماً کد را بنویسید
         try:
             session_name = self._generate_session_name("qr_login")
             session_path = self.directories['sessions'] / f"{session_name}.session"
