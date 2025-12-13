@@ -817,6 +817,128 @@ class AdvancedAccountManager:
     async def login_with_qr_code(self) -> Tuple[bool, Optional[TelegramClient], Optional[str]]:
         """ورود با QR Code - سازگار با main.py"""
         return await self.login_with_qr()
+
+    # اضافه کردن این متدها به کلاس AdvancedAccountManager
+    
+    async def handle_login(self, request):
+        """Handler برای ورود"""
+        try:
+            data = await request.json()
+            phone = data.get('phone')
+            
+            if not phone:
+                return web.json_response({
+                    'success': False,
+                    'error': 'شماره تلفن الزامی است'
+                }, status=400)
+            
+            success, client, account_id = await self.login_with_phone_advanced(phone=phone)
+            
+            return web.json_response({
+                'success': success,
+                'account_id': account_id,
+                'message': 'ورود موفق' if success else 'ورود ناموفق'
+            })
+        except Exception as e:
+            return web.json_response({
+                'success': False,
+                'error': str(e)
+            }, status=500)
+    
+    async def handle_logout(self, request):
+        """Handler برای خروج"""
+        try:
+            account_id = request.match_info.get('account_id')
+            
+            if account_id in self.active_accounts:
+                client = self.active_accounts[account_id].get('client')
+                if client:
+                    await client.disconnect()
+                del self.active_accounts[account_id]
+            
+            return web.json_response({
+                'success': True,
+                'message': 'اکانت خارج شد'
+            })
+        except Exception as e:
+            return web.json_response({
+                'success': False,
+                'error': str(e)
+            }, status=500)
+    
+    async def handle_status(self, request):
+        """Handler برای وضعیت"""
+        account_id = request.match_info.get('account_id')
+        
+        if account_id in self.active_accounts:
+            return web.json_response({
+                'success': True,
+                'account_id': account_id,
+                'status': 'active',
+                'data': self.active_accounts[account_id]
+            })
+        else:
+            return web.json_response({
+                'success': False,
+                'error': 'اکانت یافت نشد'
+            }, status=404)
+    
+    async def handle_backup(self, request):
+        """Handler برای backup"""
+        try:
+            account_id = request.match_info.get('account_id')
+            data = await request.json()
+            backup_type = data.get('type', 'full')
+            
+            backup_path = await self.backup_account(account_id, backup_type)
+            
+            if backup_path:
+                return web.json_response({
+                    'success': True,
+                    'backup_path': str(backup_path),
+                    'message': 'Backup ایجاد شد'
+                })
+            else:
+                return web.json_response({
+                    'success': False,
+                    'error': 'خطا در ایجاد backup'
+                }, status=500)
+        except Exception as e:
+            return web.json_response({
+                'success': False,
+                'error': str(e)
+            }, status=500)
+    
+    async def handle_webhook(self, request):
+        """Handler برای webhook"""
+        try:
+            data = await request.json()
+            logger.info(f"Webhook دریافت شد: {data}")
+            
+            return web.json_response({
+                'success': True,
+                'message': 'Webhook دریافت شد'
+            })
+        except Exception as e:
+            return web.json_response({
+                'success': False,
+                'error': str(e)
+            }, status=500)
+    
+    @web.middleware
+    async def auth_middleware(self, request, handler):
+        """Middleware برای احراز هویت"""
+        # احراز هویت ساده - در پروژه واقعی باید پیچیده‌تر باشد
+        auth_header = request.headers.get('Authorization')
+        
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return web.json_response({
+                'success': False,
+                'error': 'دسترسی غیرمجاز'
+            }, status=401)
+        
+        # ادامه پردازش
+        return await handler(request)
     
     # ========== سیستم چند اکانتی ==========
     
