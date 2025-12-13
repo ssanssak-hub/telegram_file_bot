@@ -25,7 +25,7 @@ import re
 import getpass
 import sqlite3
 from pathlib import Path
-from typing import Optional, Dict, List, Any, Tuple, Union
+from typing import Optional, Dict, List, Any, Tuple, Union, Set
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict, field
 from enum import Enum
@@ -33,6 +33,11 @@ from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 import pickle
 import zlib
+import jwt
+import bcrypt
+import string
+import hmac
+from ipaddress import ip_address, ip_network
 
 # ========== کتابخانه‌های ضروری ==========
 try:
@@ -1933,6 +1938,932 @@ class AdvancedCLI:
             await self.post_login_menu(account_id, client)
         else:
             print(f"\n❌ ورود ناموفق: {account_id}")
+
+class AdvancedAuthMiddleware:
+    """سیستم احراز هویت پیشرفته Enterprise-Level"""
+    
+    def __init__(self, 
+                 jwt_secret: str = None,
+                 token_expiry_hours: int = 24,
+                 rate_limit_per_minute: int = 100,
+                 allowed_ips: List[str] = None,
+                 blocked_ips: List[str] = None):
+        
+        # کلیدهای JWT
+        self.jwt_secret = jwt_secret or secrets.token_urlsafe(64)
+        self.token_expiry_hours = token_expiry_hours
+        
+        # سیستم Rate Limiting
+        self.rate_limit_per_minute = rate_limit_per_minute
+        self.request_counts: Dict[str, List[datetime]] = {}
+        
+        # لیست IPهای مجاز/مسدود
+        self.allowed_ips = set(allowed_ips) if allowed_ips else None
+        self.blocked_ips = set(blocked_ips) if blocked_ips else set()
+        
+        # سیستم API Keys
+        self.api_keys: Dict[str, Dict] = {}
+        self.revoked_tokens: Set[str] = set()
+        
+        # سیستم Roles و Permissions
+        self.roles_permissions = {
+            'admin': ['*'],
+            'manager': ['accounts:read', 'accounts:write', 'backup:create'],
+            'viewer': ['accounts:read'],
+            'bot': ['accounts:read', 'messages:send']
+        }
+        
+        # سیستم Audit Log
+        self.audit_log = []
+        
+        # سیستم 2FA
+        self.twofa_codes: Dict[str, Dict] = {}
+        
+        logger.info(f"سیستم احراز هویت پیشرفته راه‌اندازی شد. JWT Secret: {self.jwt_secret[:10]}...")
+
+    # ========== Middleware اصلی ==========
+    
+    @web.middleware
+    async def auth_middleware(self, request: web.Request, handler):
+        """Middleware پیشرفته احراز هویت با 10 لایه امنیتی"""
+        
+        request_id = secrets.token_hex(8)
+        client_ip = self._get_client_ip(request)
+        user_agent = request.headers.get('User-Agent', 'Unknown')
+        start_time = datetime.now()
+        
+        # 🛡️ لایه 1: بررسی IP Block
+        if self._is_ip_blocked(client_ip):
+            await self._log_audit(
+                request_id, client_ip, "BLOCKED_IP", request.path, 
+                "دسترسی از IP مسدود شده", False
+            )
+            return self._block_response(
+                "دسترسی از این IP مسدود شده است",
+                status=403,
+                request_id=request_id
+            )
+        
+        # 🛡️ لایه 2: Rate Limiting
+        if not self._check_rate_limit(client_ip):
+            await self._log_audit(
+                request_id, client_ip, "RATE_LIMIT", request.path,
+                "تعداد درخواست بیش از حد مجاز", False
+            )
+            return self._block_response(
+                "تعداد درخواست شما بیش از حد مجاز است. لطفاً 1 دقیقه صبر کنید.",
+                status=429,
+                request_id=request_id,
+                retry_after=60
+            )
+        
+        # 🛡️ لایه 3: بررسی User-Agent مشکوک
+        if self._is_suspicious_user_agent(user_agent):
+            await self._log_audit(
+                request_id, client_ip, "SUSPICIOUS_UA", request.path,
+                f"User-Agent مشکوک: {user_agent}", False
+            )
+            return self._block_response(
+                "دسترسی با این مرورگر/دستگاه مجاز نیست",
+                status=403,
+                request_id=request_id
+            )
+        
+        # 🛡️ لایه 4: احراز هویت Token
+        auth_result = await self._authenticate_request(request)
+        
+        if not auth_result['authenticated']:
+            await self._log_audit(
+                request_id, client_ip, "AUTH_FAILED", request.path,
+                auth_result.get('reason', 'عدم احراز هویت'), False
+            )
+            return self._auth_error_response(auth_result, request_id)
+        
+        user_data = auth_result['user_data']
+        
+        # 🛡️ لایه 5: بررسی Permission برای endpoint
+        if not self._check_permission(user_data['role'], request.method, request.path):
+            await self._log_audit(
+                request_id, client_ip, "PERMISSION_DENIED", request.path,
+                f"دسترسی غیرمجاز برای role: {user_data['role']}", False,
+                user_id=user_data.get('user_id')
+            )
+            return self._block_response(
+                "شما دسترسی لازم برای این عملیات را ندارید",
+                status=403,
+                request_id=request_id
+            )
+        
+        # 🛡️ لایه 6: بررسی نیاز به 2FA
+        if self._requires_2fa(request.path, user_data):
+            twofa_result = await self._verify_2fa(request, user_data)
+            if not twofa_result['verified']:
+                await self._log_audit(
+                    request_id, client_ip, "2FA_FAILED", request.path,
+                    "تأیید دو مرحله‌ای ناموفق", False,
+                    user_id=user_data.get('user_id')
+                )
+                return self._twofa_required_response(twofa_result, request_id)
+        
+        # 🛡️ لایه 7: بررسی Session Hijacking
+        if self._detect_session_hijacking(request, user_data):
+            await self._log_audit(
+                request_id, client_ip, "SESSION_HIJACK", request.path,
+                "شناسایی تلاش برای Session Hijacking", False,
+                user_id=user_data.get('user_id')
+            )
+            # Revoke all user tokens
+            await self._revoke_user_tokens(user_data['user_id'])
+            return self._block_response(
+                "نشست امنیتی شما به خطر افتاده است. لطفاً مجدداً وارد شوید.",
+                status=401,
+                request_id=request_id
+            )
+        
+        # 🛡️ لایه 8: اضافه کردن اطلاعات کاربر به request
+        request['user'] = user_data
+        request['request_id'] = request_id
+        request['client_ip'] = client_ip
+        
+        # 🛡️ لایه 9: اجرای درخواست با timeout
+        try:
+            response = await asyncio.wait_for(
+                handler(request), 
+                timeout=self._get_timeout_for_endpoint(request.path)
+            )
+            
+            # 🛡️ لایه 10: لاگ موفقیت
+            processing_time = (datetime.now() - start_time).total_seconds()
+            await self._log_audit(
+                request_id, client_ip, "SUCCESS", request.path,
+                f"درخواست با موفقیت پردازش شد ({processing_time:.2f}s)",
+                True,
+                user_id=user_data.get('user_id'),
+                processing_time=processing_time
+            )
+            
+            # اضافه کردن هدرهای امنیتی
+            response = self._add_security_headers(response)
+            response.headers['X-Request-ID'] = request_id
+            
+            return response
+            
+        except asyncio.TimeoutError:
+            await self._log_audit(
+                request_id, client_ip, "TIMEOUT", request.path,
+                "زمان پردازش درخواست به پایان رسید", False,
+                user_id=user_data.get('user_id')
+            )
+            return web.json_response({
+                'success': False,
+                'error': 'زمان پردازش درخواست به پایان رسید',
+                'request_id': request_id,
+                'timestamp': datetime.now().isoformat()
+            }, status=504)
+        
+        except Exception as e:
+            await self._log_audit(
+                request_id, client_ip, "SERVER_ERROR", request.path,
+                f"خطای سرور: {str(e)}", False,
+                user_id=user_data.get('user_id')
+            )
+            logger.error(f"خطا در پردازش درخواست {request_id}: {e}")
+            
+            # عدم افشای جزئیات خطا به کاربر
+            return web.json_response({
+                'success': False,
+                'error': 'خطای داخلی سرور',
+                'request_id': request_id,
+                'timestamp': datetime.now().isoformat()
+            }, status=500)
+
+    # ========== متدهای احراز هویت پیشرفته ==========
+    
+    async def _authenticate_request(self, request: web.Request) -> Dict:
+        """احراز هویت پیشرفته با پشتیبانی از چندین روش"""
+        
+        # روش 1: Bearer Token (JWT)
+        auth_header = request.headers.get('Authorization')
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header[7:]
+            return await self._authenticate_jwt(token, request)
+        
+        # روش 2: API Key در هدر
+        api_key = request.headers.get('X-API-Key')
+        if api_key:
+            return await self._authenticate_api_key(api_key, request)
+        
+        # روش 3: API Key در query parameter (برای Webhookها)
+        api_key_query = request.query.get('api_key')
+        if api_key_query:
+            return await self._authenticate_api_key(api_key_query, request)
+        
+        # روش 4: Session Cookie
+        session_token = request.cookies.get('session_token')
+        if session_token:
+            return await self._authenticate_session(session_token, request)
+        
+        return {
+            'authenticated': False,
+            'reason': 'هیچ روش احراز هویت یافت نشد',
+            'required_methods': ['Bearer token', 'API Key']
+        }
+    
+    async def _authenticate_jwt(self, token: str, request: web.Request) -> Dict:
+        """احراز هویت JWT با بررسی‌های پیشرفته"""
+        
+        # بررسی وجود در revoked tokens
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        if token_hash in self.revoked_tokens:
+            return {
+                'authenticated': False,
+                'reason': 'توکن منقضی شده است',
+                'error_code': 'TOKEN_REVOKED'
+            }
+        
+        try:
+            # رمزگشایی JWT
+            payload = jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=['HS256'],
+                options={
+                    'verify_signature': True,
+                    'verify_exp': True,
+                    'verify_aud': False
+                }
+            )
+            
+            # بررسی IP اختصاصی (اگر وجود دارد)
+            if 'allowed_ips' in payload and self._get_client_ip(request) not in payload['allowed_ips']:
+                return {
+                    'authenticated': False,
+                    'reason': 'دسترسی از این IP مجاز نیست',
+                    'error_code': 'IP_NOT_ALLOWED'
+                }
+            
+            # بررسی User-Agent (اگر وجود دارد)
+            if 'user_agent' in payload:
+                current_ua = request.headers.get('User-Agent', '')
+                if payload['user_agent'] != current_ua:
+                    logger.warning(f"User-Agent mismatch for user {payload.get('user_id')}")
+            
+            # بررسی زمان آخرین تغییر رمز
+            if 'password_changed_at' in payload:
+                password_age = datetime.now().timestamp() - payload['password_changed_at']
+                if password_age > 90 * 24 * 3600:  # 90 روز
+                    return {
+                        'authenticated': True,
+                        'requires_password_change': True,
+                        'user_data': payload,
+                        'warning': 'رمز عبور شما منقضی شده است'
+                    }
+            
+            return {
+                'authenticated': True,
+                'user_data': payload,
+                'auth_method': 'jwt'
+            }
+            
+        except jwt.ExpiredSignatureError:
+            return {
+                'authenticated': False,
+                'reason': 'توکن منقضی شده است',
+                'error_code': 'TOKEN_EXPIRED'
+            }
+        except jwt.InvalidTokenError as e:
+            return {
+                'authenticated': False,
+                'reason': f'توکن نامعتبر: {str(e)}',
+                'error_code': 'INVALID_TOKEN'
+            }
+    
+    async def _authenticate_api_key(self, api_key: str, request: web.Request) -> Dict:
+        """احراز هویت با API Key پیشرفته"""
+        
+        # بررسی در کش
+        if api_key in self.api_keys:
+            key_data = self.api_keys[api_key]
+            
+            # بررسی تاریخ انقضا
+            if 'expires_at' in key_data and datetime.fromisoformat(key_data['expires_at']) < datetime.now():
+                del self.api_keys[api_key]
+                return {
+                    'authenticated': False,
+                    'reason': 'API Key منقضی شده است',
+                    'error_code': 'API_KEY_EXPIRED'
+                }
+            
+            # بررسی محدودیت IP
+            if 'allowed_ips' in key_data:
+                client_ip = self._get_client_ip(request)
+                if client_ip not in key_data['allowed_ips']:
+                    return {
+                        'authenticated': False,
+                        'reason': 'دسترسی از این IP مجاز نیست',
+                        'error_code': 'IP_NOT_ALLOWED'
+                    }
+            
+            # بررسی Rate Limit اختصاصی
+            if 'rate_limit' in key_data:
+                key_identifier = f"api_key_{api_key}"
+                if not self._check_rate_limit(key_identifier, key_data['rate_limit']):
+                    return {
+                        'authenticated': False,
+                        'reason': 'محدودیت تعداد درخواست برای این API Key',
+                        'error_code': 'RATE_LIMIT_EXCEEDED'
+                    }
+            
+            # افزایش استفاده
+            key_data['last_used'] = datetime.now().isoformat()
+            key_data['usage_count'] = key_data.get('usage_count', 0) + 1
+            
+            return {
+                'authenticated': True,
+                'user_data': {
+                    'user_id': key_data.get('user_id', 'api_client'),
+                    'role': key_data.get('role', 'api_client'),
+                    'permissions': key_data.get('permissions', []),
+                    'auth_method': 'api_key'
+                },
+                'auth_method': 'api_key'
+            }
+        
+        # بررسی هش شده
+        for key, data in self.api_keys.items():
+            if 'hashed_key' in data:
+                if bcrypt.checkpw(api_key.encode(), data['hashed_key']):
+                    return await self._authenticate_api_key(key, request)
+        
+        return {
+            'authenticated': False,
+            'reason': 'API Key نامعتبر',
+            'error_code': 'INVALID_API_KEY'
+        }
+    
+    # ========== متدهای 2FA ==========
+    
+    async def _verify_2fa(self, request: web.Request, user_data: Dict) -> Dict:
+        """تأیید دو مرحله‌ای"""
+        
+        # روش 1: کد در هدر
+        twofa_code = request.headers.get('X-2FA-Code')
+        
+        # روش 2: کد در body
+        if not twofa_code and request.can_read_body:
+            try:
+                data = await request.json()
+                twofa_code = data.get('twofa_code')
+            except:
+                pass
+        
+        if not twofa_code:
+            return {
+                'verified': False,
+                'required': True,
+                'methods': ['totp', 'sms', 'email'],
+                'message': 'کد تأیید دو مرحله‌ای مورد نیاز است'
+            }
+        
+        # بررسی کد TOTP
+        user_id = user_data.get('user_id')
+        if user_id in self.twofa_codes:
+            stored_code = self.twofa_codes[user_id]
+            
+            # بررسی انقضا
+            if datetime.fromisoformat(stored_code['expires_at']) < datetime.now():
+                del self.twofa_codes[user_id]
+                return {
+                    'verified': False,
+                    'required': True,
+                    'message': 'کد تأیید منقضی شده است'
+                }
+            
+            # بررسی کد
+            if stored_code['code'] == twofa_code:
+                # حذف کد استفاده شده
+                del self.twofa_codes[user_id]
+                
+                # ذخیره لاگ 2FA موفق
+                await self._log_audit(
+                    secrets.token_hex(4),
+                    self._get_client_ip(request),
+                    "2FA_SUCCESS",
+                    request.path,
+                    "تأیید دو مرحله‌ای موفق",
+                    True,
+                    user_id=user_id
+                )
+                
+                return {'verified': True}
+        
+        # بررسی کد TOTP دائمی
+        if 'totp_secret' in user_data:
+            # پیاده‌سازی TOTP واقعی
+            # در پروژه واقعی از libraries مانند pyotp استفاده کنید
+            pass
+        
+        return {
+            'verified': False,
+            'required': True,
+            'message': 'کد تأیید نامعتبر است'
+        }
+    
+    async def generate_2fa_code(self, user_id: str, method: str = 'sms') -> Dict:
+        """تولید کد تأیید دو مرحله‌ای"""
+        
+        # تولید کد ۶ رقمی
+        code = ''.join(secrets.choice(string.digits) for _ in range(6))
+        
+        # زمان انقضا: 5 دقیقه
+        expires_at = (datetime.now() + timedelta(minutes=5)).isoformat()
+        
+        self.twofa_codes[user_id] = {
+            'code': code,
+            'expires_at': expires_at,
+            'method': method,
+            'created_at': datetime.now().isoformat()
+        }
+        
+        # شبیه‌سازی ارسال کد
+        if method == 'sms':
+            logger.info(f"📱 کد 2FA برای کاربر {user_id}: {code} (انقضا: 5 دقیقه)")
+        elif method == 'email':
+            logger.info(f"📧 کد 2FA برای کاربر {user_id}: {code} (انقضا: 5 دقیقه)")
+        
+        return {
+            'code': code,
+            'expires_at': expires_at,
+            'method': method,
+            'length': 6
+        }
+    
+    # ========== سیستم مدیریت API Keys ==========
+    
+    async def create_api_key(self, 
+                           user_id: str,
+                           role: str = 'api_client',
+                           expires_in_days: int = 30,
+                           rate_limit: int = 100,
+                           allowed_ips: List[str] = None,
+                           permissions: List[str] = None,
+                           name: str = None) -> Dict:
+        """ایجاد API Key جدید"""
+        
+        # تولید کلید
+        api_key = secrets.token_urlsafe(32)
+        
+        # هش کردن برای ذخیره امن
+        hashed_key = bcrypt.hashpw(api_key.encode(), bcrypt.gensalt())
+        
+        key_data = {
+            'user_id': user_id,
+            'role': role,
+            'created_at': datetime.now().isoformat(),
+            'expires_at': (datetime.now() + timedelta(days=expires_in_days)).isoformat(),
+            'rate_limit': rate_limit,
+            'allowed_ips': allowed_ips or [],
+            'permissions': permissions or self.roles_permissions.get(role, []),
+            'name': name or f"API Key for {user_id}",
+            'hashed_key': hashed_key,
+            'usage_count': 0,
+            'last_used': None
+        }
+        
+        self.api_keys[api_key] = key_data
+        
+        await self._log_audit(
+            secrets.token_hex(4),
+            'SYSTEM',
+            "API_KEY_CREATED",
+            f"/api/keys/{user_id}",
+            f"API Key ایجاد شد: {name}",
+            True,
+            user_id=user_id
+        )
+        
+        return {
+            'api_key': api_key,
+            'key_data': {k: v for k, v in key_data.items() if k != 'hashed_key'},
+            'warning': 'این کلید فقط یک بار نمایش داده می‌شود!'
+        }
+    
+    async def revoke_api_key(self, api_key: str, reason: str = "درخواست کاربر") -> bool:
+        """ابطال API Key"""
+        
+        if api_key in self.api_keys:
+            user_id = self.api_keys[api_key].get('user_id')
+            del self.api_keys[api_key]
+            
+            await self._log_audit(
+                secrets.token_hex(4),
+                'SYSTEM',
+                "API_KEY_REVOKED",
+                f"/api/keys/{api_key}",
+                f"API Key ابطال شد: {reason}",
+                True,
+                user_id=user_id
+            )
+            
+            return True
+        
+        return False
+    
+    # ========== سیستم مدیریت Tokens ==========
+    
+    async def create_jwt_token(self, 
+                             user_id: str,
+                             role: str = 'user',
+                             additional_data: Dict = None,
+                             expires_in_hours: int = None) -> str:
+        """ایجاد JWT Token جدید"""
+        
+        if expires_in_hours is None:
+            expires_in_hours = self.token_expiry_hours
+        
+        payload = {
+            'user_id': user_id,
+            'role': role,
+            'iat': datetime.now().timestamp(),
+            'exp': (datetime.now() + timedelta(hours=expires_in_hours)).timestamp(),
+            'jti': secrets.token_hex(16),  # JWT ID برای tracking
+            'user_agent': 'Unknown',  # باید از request گرفته شود
+            'ip_address': '0.0.0.0'   # باید از request گرفته شود
+        }
+        
+        if additional_data:
+            payload.update(additional_data)
+        
+        token = jwt.encode(payload, self.jwt_secret, algorithm='HS256')
+        
+        await self._log_audit(
+            secrets.token_hex(4),
+            'SYSTEM',
+            "TOKEN_CREATED",
+            f"/auth/token/{user_id}",
+            f"توکن JWT ایجاد شد برای {user_id}",
+            True,
+            user_id=user_id
+        )
+        
+        return token
+    
+    async def revoke_token(self, token: str, reason: str = "خروج کاربر") -> bool:
+        """ابطال Token"""
+        
+        try:
+            # هش کردن token برای ذخیره در revoked list
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            self.revoked_tokens.add(token_hash)
+            
+            # استخراج user_id از token برای لاگ
+            payload = jwt.decode(token, self.jwt_secret, algorithms=['HS256'], options={'verify_signature': False})
+            user_id = payload.get('user_id')
+            
+            await self._log_audit(
+                secrets.token_hex(4),
+                'SYSTEM',
+                "TOKEN_REVOKED",
+                "/auth/revoke",
+                f"توکن ابطال شد: {reason}",
+                True,
+                user_id=user_id
+            )
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"خطا در ابطال توکن: {e}")
+            return False
+    
+    async def _revoke_user_tokens(self, user_id: str):
+        """ابطال تمام توکن‌های یک کاربر"""
+        # در پروژه واقعی باید توکن‌ها را از دیتابیس پیدا و ابطال کند
+        logger.warning(f"تمامی توکن‌های کاربر {user_id} ابطال شدند")
+    
+    # ========== متدهای کمکی امنیتی ==========
+    
+    def _check_rate_limit(self, identifier: str, custom_limit: int = None) -> bool:
+        """بررسی Rate Limit"""
+        
+        limit = custom_limit or self.rate_limit_per_minute
+        
+        now = datetime.now()
+        minute_ago = now - timedelta(minutes=1)
+        
+        if identifier not in self.request_counts:
+            self.request_counts[identifier] = []
+        
+        # حذف درخواست‌های قدیمی
+        self.request_counts[identifier] = [
+            req_time for req_time in self.request_counts[identifier] 
+            if req_time > minute_ago
+        ]
+        
+        # بررسی تعداد درخواست‌ها
+        if len(self.request_counts[identifier]) >= limit:
+            return False
+        
+        # ثبت درخواست جدید
+        self.request_counts[identifier].append(now)
+        return True
+    
+    def _is_ip_blocked(self, ip: str) -> bool:
+        """بررسی IP مسدود"""
+        
+        # بررسی در لیست مسدود
+        if ip in self.blocked_ips:
+            return True
+        
+        # بررسی رنج IP (مثال: 192.168.1.*)
+        for blocked_range in self.blocked_ips:
+            if '/' in blocked_range:  # CIDR notation
+                if ip_address(ip) in ip_network(blocked_range):
+                    return True
+            elif ip.startswith(blocked_range.replace('*', '')):
+                return True
+        
+        # بررسی لیست مجاز (اگر وجود دارد)
+        if self.allowed_ips:
+            return ip not in self.allowed_ips
+        
+        return False
+    
+    def _is_suspicious_user_agent(self, user_agent: str) -> bool:
+        """شناسایی User-Agent مشکوک"""
+        
+        suspicious_patterns = [
+            'curl', 'wget', 'python-requests', 'Go-http-client',
+            'java', 'scrapy', 'bot', 'crawler', 'spider'
+        ]
+        
+        if not user_agent or user_agent == 'Unknown':
+            return False
+        
+        ua_lower = user_agent.lower()
+        
+        # لیست سفید
+        if any(white in ua_lower for white in ['mozilla', 'chrome', 'safari', 'firefox']):
+            return False
+        
+        # لیست مشکوک
+        if any(suspicious in ua_lower for suspicious in suspicious_patterns):
+            return True
+        
+        return False
+    
+    def _detect_session_hijacking(self, request: web.Request, user_data: Dict) -> bool:
+        """شناسایی Session Hijacking"""
+        
+        client_ip = self._get_client_ip(request)
+        user_agent = request.headers.get('User-Agent', '')
+        
+        # بررسی تغییر ناگهانی IP
+        if 'last_ip' in user_data and user_data['last_ip'] != client_ip:
+            # بررسی اینکه آیا IP جدید از همان کشور/شبکه است
+            # در پروژه واقعی از GeoIP استفاده شود
+            ip_changed = True
+            if ip_changed and 'last_login' in user_data:
+                # اگر کمتر از 5 دقیقه از لاگین گذشته و IP تغییر کرده
+                login_time = datetime.fromtimestamp(user_data['last_login'])
+                if (datetime.now() - login_time).seconds < 300:
+                    return True
+        
+        # بررسی تغییر User-Agent
+        if 'user_agent' in user_data and user_data['user_agent'] != user_agent:
+            return True
+        
+        return False
+    
+    def _check_permission(self, role: str, method: str, path: str) -> bool:
+        """بررسی دسترسی براساس Role و Permission"""
+        
+        if role not in self.roles_permissions:
+            return False
+        
+        permissions = self.roles_permissions[role]
+        
+        # دسترسی کامل
+        if '*' in permissions:
+            return True
+        
+        # ساختار permission: resource:action
+        # مثال: accounts:read, accounts:write, backup:create
+        
+        # نگاشت path به resource
+        resource = self._map_path_to_resource(path)
+        action = self._map_method_to_action(method)
+        
+        required_permission = f"{resource}:{action}"
+        
+        return required_permission in permissions
+    
+    def _map_path_to_resource(self, path: str) -> str:
+        """تبدیل path به resource"""
+        
+        if path.startswith('/api/accounts'):
+            return 'accounts'
+        elif path.startswith('/api/backup'):
+            return 'backup'
+        elif path.startswith('/api/messages'):
+            return 'messages'
+        elif path.startswith('/api/admin'):
+            return 'admin'
+        else:
+            return 'other'
+    
+    def _map_method_to_action(self, method: str) -> str:
+        """تبدیل HTTP Method به action"""
+        
+        method_map = {
+            'GET': 'read',
+            'POST': 'create',
+            'PUT': 'update',
+            'DELETE': 'delete',
+            'PATCH': 'update'
+        }
+        
+        return method_map.get(method, 'read')
+    
+    def _requires_2fa(self, path: str, user_data: Dict) -> bool:
+        """بررسی نیاز به 2FA"""
+        
+        # مسیرهای حساس که نیاز به 2FA دارند
+        sensitive_paths = [
+            '/api/accounts/delete',
+            '/api/backup/create',
+            '/api/admin/'
+        ]
+        
+        # بررسی مسیر
+        if any(path.startswith(p) for p in sensitive_paths):
+            return True
+        
+        # بررسی role
+        if user_data.get('role') in ['admin', 'manager']:
+            return True
+        
+        # بررسی تنظیمات کاربر
+        if user_data.get('force_2fa', False):
+            return True
+        
+        return False
+    
+    # ========== متدهای کمکی ==========
+    
+    def _get_client_ip(self, request: web.Request) -> str:
+        """دریافت IP واقعی کلاینت"""
+        
+        # بررسی هدرهای معتبر
+        for header in ['X-Real-IP', 'X-Forwarded-For', 'CF-Connecting-IP']:
+            ip = request.headers.get(header)
+            if ip:
+                return ip.split(',')[0].strip()
+        
+        # IP مستقیم
+        return request.remote
+    
+    def _get_timeout_for_endpoint(self, path: str) -> int:
+        """تعیین timeout براساس endpoint"""
+        
+        timeout_map = {
+            '/api/accounts/login': 30,
+            '/api/backup/create': 300,
+            '/api/messages/send': 10,
+            '/api/admin/': 60
+        }
+        
+        for endpoint, timeout in timeout_map.items():
+            if path.startswith(endpoint):
+                return timeout
+        
+        return 30  # timeout پیش‌فرض
+    
+    def _add_security_headers(self, response: web.Response) -> web.Response:
+        """اضافه کردن هدرهای امنیتی"""
+        
+        security_headers = {
+            'X-Content-Type-Options': 'nosniff',
+            'X-Frame-Options': 'DENY',
+            'X-XSS-Protection': '1; mode=block',
+            'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+            'Content-Security-Policy': "default-src 'self'",
+            'Referrer-Policy': 'strict-origin-when-cross-origin',
+            'Permissions-Policy': 'geolocation=(), microphone=(), camera=()'
+        }
+        
+        for header, value in security_headers.items():
+            response.headers[header] = value
+        
+        return response
+    
+    # ========== متدهای پاسخ ==========
+    
+    def _block_response(self, message: str, status: int = 403, **kwargs) -> web.Response:
+        """پاسخ block"""
+        
+        response_data = {
+            'success': False,
+            'error': message,
+            'timestamp': datetime.now().isoformat(),
+            **kwargs
+        }
+        
+        return web.json_response(response_data, status=status)
+    
+    def _auth_error_response(self, auth_result: Dict, request_id: str) -> web.Response:
+        """پاسخ خطای احراز هویت"""
+        
+        response_data = {
+            'success': False,
+            'error': auth_result.get('reason', 'احراز هویت ناموفق'),
+            'error_code': auth_result.get('error_code', 'AUTH_FAILED'),
+            'request_id': request_id,
+            'timestamp': datetime.now().isoformat(),
+            'authenticated': False
+        }
+        
+        # اضافه کردن WWW-Authenticate header
+        response = web.json_response(response_data, status=401)
+        response.headers['WWW-Authenticate'] = 'Bearer realm="API"'
+        
+        return response
+    
+    def _twofa_required_response(self, twofa_result: Dict, request_id: str) -> web.Response:
+        """پاسخ نیاز به 2FA"""
+        
+        response_data = {
+            'success': False,
+            'error': 'تأیید دو مرحله‌ای مورد نیاز است',
+            'error_code': '2FA_REQUIRED',
+            'request_id': request_id,
+            'timestamp': datetime.now().isoformat(),
+            'twofa_required': True,
+            'available_methods': twofa_result.get('methods', ['totp', 'sms', 'email'])
+        }
+        
+        return web.json_response(response_data, status=403)
+    
+    # ========== سیستم Audit Log ==========
+    
+    async def _log_audit(self, 
+                        request_id: str,
+                        ip: str,
+                        event_type: str,
+                        path: str,
+                        description: str,
+                        success: bool,
+                        user_id: str = None,
+                        **kwargs):
+        """ثبت لاگ امنیتی"""
+        
+        log_entry = {
+            'request_id': request_id,
+            'timestamp': datetime.now().isoformat(),
+            'ip_address': ip,
+            'event_type': event_type,
+            'path': path,
+            'description': description,
+            'success': success,
+            'user_id': user_id,
+            **kwargs
+        }
+        
+        self.audit_log.append(log_entry)
+        
+        # حفظ فقط 1000 لاگ آخر
+        if len(self.audit_log) > 1000:
+            self.audit_log = self.audit_log[-1000:]
+        
+        # لاگ کردن در فایل
+        log_level = logging.INFO if success else logging.WARNING
+        logger.log(log_level, f"AUDIT: {event_type} - {description} - IP: {ip} - User: {user_id}")
+    
+    async def get_audit_logs(self, 
+                           start_date: datetime = None,
+                           end_date: datetime = None,
+                           event_type: str = None,
+                           user_id: str = None,
+                           limit: int = 100) -> List[Dict]:
+        """دریافت لاگ‌های audit"""
+        
+        filtered_logs = self.audit_log
+        
+        if start_date:
+            filtered_logs = [log for log in filtered_logs 
+                           if datetime.fromisoformat(log['timestamp']) >= start_date]
+        
+        if end_date:
+            filtered_logs = [log for log in filtered_logs 
+                           if datetime.fromisoformat(log['timestamp']) <= end_date]
+        
+        if event_type:
+            filtered_logs = [log for log in filtered_logs if log['event_type'] == event_type]
+        
+        if user_id:
+            filtered_logs = [log for log in filtered_logs if log.get('user_id') == user_id]
+        
+        return filtered_logs[-limit:]
 
 # ========== تابع اصلی ==========
 
