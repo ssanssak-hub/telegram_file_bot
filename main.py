@@ -221,27 +221,25 @@ async def backup_account(manager):
     else:
         print("❌ خطا در ایجاد backup")
 
+# اصلاح بخش start_api_server:
 async def start_api_server(manager):
-    """شروع API سرور"""
-    print("\n⚙️ شروع API سرور")
-    
     try:
         port = int(input("پورت (پیش‌فرض: 8080): ").strip() or "8080")
         
         print(f"⏳ در حال شروع API سرور روی پورت {port}...")
-        await manager.start_api_server(port=port)
+        server_task = asyncio.create_task(manager.start_api_server(port=port))
         
         print(f"✅ API سرور شروع شد: http://127.0.0.1:{port}")
         print("🛑 برای توقف: Ctrl+C")
         
-        # اجرای نامحدود
-        await asyncio.Future()
-        
-    except ValueError:
-        print("❌ پورت باید عدد باشد")
-    except ImportError:
-        print("❌ کتابخانه aiohttp نصب نشده")
-        print("   pip install aiohttp")
+        # اجرای نامحدود با مدیریت interrupt
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            print("\n🛑 API سرور متوقف شد")
+            
+    except KeyboardInterrupt:
+        print("\n🛑 توسط کاربر لغو شد")
     except Exception as e:
         print(f"❌ خطا: {e}")
 
