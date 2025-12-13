@@ -1319,22 +1319,80 @@ class AdvancedAccountManager:
         app = web.Application()
         
         # تعریف routes
-        app.router.add_get('/api/accounts', self.handle_list_accounts)
-        app.router.add_post('/api/accounts/login', self.handle_login)
-        app.router.add_delete('/api/accounts/{account_id}', self.handle_logout)
-        app.router.add_get('/api/accounts/{account_id}/status', self.handle_status)
-        app.router.add_post('/api/accounts/{account_id}/backup', self.handle_backup)
-        app.router.add_post('/api/webhook', self.handle_webhook)
-        
+        # ========== اضافه کردن Middleware‌ها ==========
+        app.middlewares.append(self.auth_middleware)  # Middleware احراز هویت
+        app.middlewares.append(self.logging_middleware)  # Middleware لاگ‌گیری
+        app.middlewares.append(self.cors_middleware)  # Middleware CORS
+        app.middlewares.append(self.error_handling_middleware)  # Middleware مدیریت خطا
+        # ========== تعریف Routes ==========
+        # Routes عمومی (بدون احراز هویت)
+        app.router.add_post('/api/auth/login', self.handle_auth_login)
+        app.router.add_post('/api/auth/register', self.handle_auth_register)
+        app.router.add_get('/api/auth/verify', self.handle_auth_verify)
+        # Routes خصوصی (نیاز به احراز هویت)
+        private_routes = web.RouteTableDef()
+
         # middleware برای احراز هویت
         app.middlewares.append(self.auth_middleware)
-        
+
+        @private_routes.get('/api/accounts')
+        async def handle_list_accounts(request):
+            return await self.handle_list_accounts(request)
+
+        @private_routes.post('/api/accounts/login')
+        async def handle_login(request):
+            return await self.handle_login(request)
+    
+        @private_routes.delete('/api/accounts/{account_id}')
+        async def handle_logout(request):
+            return await self.handle_logout(request)
+    
+        @private_routes.get('/api/accounts/{account_id}/status')
+        async def handle_status(request):
+            return await self.handle_status(request)
+    
+        @private_routes.post('/api/accounts/{account_id}/backup')
+        async def handle_backup(request):
+            return await self.handle_backup(request)
+    
+        @private_routes.post('/api/webhook')
+        async def handle_webhook(request):
+            return await self.handle_webhook(request)
+
+        # اضافه کردن routes خصوصی به app
+        app.add_routes(private_routes)
+
+        # ========== Routes مدیریت کاربران ==========
+        app.router.add_post('/api/users/create', self.handle_create_user)
+        app.router.post('/api/users/{user_id}/apikey', self.handle_generate_apikey)
+        app.router.get('/api/users/{user_id}/logs', self.handle_get_user_logs)
+    
+        # ========== Routes مدیریت سیستم ==========
+        app.router.get('/api/system/status', self.handle_system_status)
+        app.router.get('/api/system/metrics', self.handle_system_metrics)
+        app.router.get('/api/system/audit', self.handle_system_audit)
+    
+        # ========== تنظیمات CORS ==========
+        self._setup_cors(app)
+    
+        # ========== تنظیمات Static Files ==========
+        self._setup_static_files(app)
+
+        # ========== شروع سرور ==========
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, host, port)
         
         await site.start()
-        logger.info(f"API سرور شروع شد: http://{host}:{port}")
+
+        logger.info(f"✅ API سرور پیشرفته شروع شد: http://{host}:{port}")
+        logger.info("📋 Routes فعال:")
+        logger.info("  - POST   /api/auth/login")
+        logger.info("  - POST   /api/auth/register")
+        logger.info("  - GET    /api/accounts (نیاز به token)")
+        logger.info("  - POST   /api/accounts/login (نیاز به token)")
+        logger.info("  - DELETE /api/accounts/{id} (نیاز به token)")
+        logger.info("  - POST   /api/users/create (نیاز به token admin)")
         
         return runner
     
