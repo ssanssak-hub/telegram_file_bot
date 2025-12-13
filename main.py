@@ -140,6 +140,7 @@ async def login_with_phone(manager):
     print("⏳ در حال ورود...")
     success, client, account_id = await manager.login_with_phone_advanced(
         phone=phone,
+        session_name=None,  # ✅ اضافه کردن
         use_proxy=use_proxy,
         enable_2fa=True
     )
