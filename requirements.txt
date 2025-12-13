@@ -3,7 +3,45 @@
 # Core
 python>=3.8,<3.12
 asyncio>=3.4.3
+# کتابخانه‌های اصلی
+python-telegram-bot==20.7
+telethon==1.34.0
 
+# رمزنگاری و امنیت
+cryptography==42.0.5
+pyotp==2.9.0
+qrcode[pil]==7.4.2
+
+# گزارش‌گیری و export
+pandas==2.1.4
+numpy==1.24.3
+reportlab==4.0.7
+openpyxl==3.1.2
+
+# یادگیری ماشین و تحلیل
+scikit-learn==1.3.2
+psutil==5.9.7
+
+# وب و API
+aiohttp==3.9.3
+fastapi==0.104.1
+uvicorn==0.24.0
+
+# دیتابیس و ذخیره‌سازی
+sqlalchemy==2.0.27
+aiosqlite==0.19.0
+
+# ابزارهای کمکی
+python-dotenv==1.0.0
+colorlog==6.8.2
+pytz==2023.3
+tzlocal==5.2
+
+# توسعه
+pytest==7.4.3
+pytest-asyncio==0.21.1
+black==23.11.0
+flake8==6.1.0
 # Telegram
 telethon==1.34.0
 python-telegram-bot==20.7
